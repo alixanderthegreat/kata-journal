@@ -323,6 +323,64 @@ func TestPruneAutonomous(t *testing.T) {
 	}
 }
 
+// TestClosedCycles proves ClosedCycles returns every closed cycle for a thread, newest first,
+// excluding the still-active one - the full history behind LastClosed's single most-recent
+// entry. Also exercises LastClosed itself (previously untested) since it shares the exact same
+// seed data and ordering guarantee.
+func TestClosedCycles(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kata.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	thread := "thread-a"
+	deadline := time.Now().Add(time.Hour)
+
+	var closedIDs []int64
+	for i := 0; i < 3; i++ {
+		c, err := s.Start(ctx, thread, "directed", "c", "t", "cur", deadline)
+		if err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+		if _, err := s.CloseCycle(ctx, thread, fmt.Sprintf("result %d", i)); err != nil {
+			t.Fatalf("CloseCycle %d: %v", i, err)
+		}
+		closedIDs = append(closedIDs, c.ID)
+	}
+	active, err := s.Start(ctx, thread, "directed", "c", "t", "cur", deadline)
+	if err != nil {
+		t.Fatalf("Start active: %v", err)
+	}
+
+	closed, err := s.ClosedCycles(ctx, thread)
+	if err != nil {
+		t.Fatalf("ClosedCycles: %v", err)
+	}
+	if len(closed) != len(closedIDs) {
+		t.Fatalf("expected %d closed cycles, got %d", len(closedIDs), len(closed))
+	}
+	for i, c := range closed {
+		wantID := closedIDs[len(closedIDs)-1-i] // newest first
+		if c.ID != wantID {
+			t.Fatalf("closed[%d].ID = %d, want %d (newest-first order)", i, c.ID, wantID)
+		}
+		if c.ID == active.ID {
+			t.Fatalf("ClosedCycles returned the still-active cycle %d", active.ID)
+		}
+	}
+
+	lastClosed, err := s.LastClosed(ctx, thread)
+	if err != nil {
+		t.Fatalf("LastClosed: %v", err)
+	}
+	if lastClosed == nil || lastClosed.ID != closed[0].ID {
+		t.Fatalf("LastClosed disagrees with ClosedCycles[0]: got %+v, want id %d", lastClosed, closed[0].ID)
+	}
+}
+
 // TestUpdateScopedByThread guards against a real bug: two different threads independently
 // reaching the same numeric id (expected and common - each thread counts from its own zero, see
 // insert) must never cross-contaminate on update.

@@ -129,6 +129,7 @@ than duplicated here. Short version:
 | `close-expired [results]` | Close honestly once the deadline has passed, complete or not |
 | `active` | Show the current open cycle |
 | `history` | Show the most recently closed cycle |
+| `log [keyword]` | List every closed cycle, newest first; `keyword` filters by substring across Challenge/Target/Current/Expectations/Results |
 
 ## Storage and scope
 
@@ -150,3 +151,5 @@ stepping on each other's active cycle.
 - **Challenge lives in the database, not an environment variable.** It's a project-wide constant
   (`kata challenge <text>`), so it survives across shells and machines instead of needing to be
   re-exported every session.
+- **No semantic search, on purpose.** `kata log` filters by plain substring, not embeddings - a
+  personal-scale journal doesn't have the volume to justify it, and it's one less dependency.

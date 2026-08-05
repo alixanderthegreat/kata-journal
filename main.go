@@ -123,6 +123,8 @@ func run(store *kata.Store, verb string, args []string) error {
 			return fmt.Errorf("no closed cycle yet for thread %q", thread)
 		}
 		return printCycle(c)
+	case "log":
+		return cmdLog(ctx, store, thread, args)
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -233,6 +235,38 @@ func printCycle(c *kata.Cycle) error {
 	return nil
 }
 
+// cmdLog lists every closed cycle for thread, newest first - history further back than
+// LastClosed's single most-recent one. An optional keyword filters case-insensitively across
+// Challenge, Target Condition, Current Condition, Expectations, and Results - a plain substring
+// match, not semantic search (see kata.Store's own doc comment on why that's enough here).
+func cmdLog(ctx context.Context, store *kata.Store, thread string, args []string) error {
+	cycles, err := store.ClosedCycles(ctx, thread)
+	if err != nil {
+		return err
+	}
+	if len(args) > 0 {
+		keyword := strings.ToLower(args[0])
+		var matched []*kata.Cycle
+		for _, c := range cycles {
+			haystack := strings.ToLower(c.Challenge + " " + c.TargetCondition + " " +
+				c.CurrentCondition + " " + c.Expectations + " " + c.Results)
+			if strings.Contains(haystack, keyword) {
+				matched = append(matched, c)
+			}
+		}
+		cycles = matched
+	}
+	if cycles == nil {
+		cycles = []*kata.Cycle{} // marshal as [], not null - matched by no results is a valid answer
+	}
+	b, err := json.MarshalIndent(cycles, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
+}
+
 func usage() {
 	fmt.Print(`kata - a standalone structured-planning tool
 
@@ -278,6 +312,10 @@ Verbs:
                                  gets an honest "no results by the deadline" default
   active                        show the current open cycle
   history                       show the most recently closed cycle
+  log [keyword]                  list every closed cycle, newest first, as a JSON array;
+                                 keyword filters case-insensitively across Challenge, Target,
+                                 Current, Expectations, and Results - a plain substring match,
+                                 not semantic search
 
 Caution: a text argument containing a bare $ or a backtick can get expanded or executed by your
 own shell before this program ever sees it (e.g. inside a double-quoted bash argument) - the

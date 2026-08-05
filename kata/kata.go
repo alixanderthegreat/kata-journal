@@ -321,6 +321,38 @@ func (s *Store) LastClosed(ctx context.Context, thread string) (*Cycle, error) {
 	return result, nil
 }
 
+// ClosedCycles returns every closed cycle for thread, newest first - the full history behind
+// LastClosed's single most-recent one, for browsing back further than one cycle. Never a lot of
+// rows for a single-operator tool, so a full bucket walk (same pattern as PruneAutonomous) is
+// simpler than maintaining a separate index.
+func (s *Store) ClosedCycles(ctx context.Context, thread string) ([]*Cycle, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var results []*Cycle
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := threadBucket(tx, thread)
+		if bucket == nil {
+			return nil
+		}
+		cur := bucket.Cursor()
+		for k, v := cur.Last(); k != nil; k, v = cur.Prev() {
+			c, err := decode(idFromKey(k), thread, v)
+			if err != nil {
+				return err
+			}
+			if c.ClosedAt != nil {
+				results = append(results, c)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query closed cycles: %w", err)
+	}
+	return results, nil
+}
+
 // PruneAutonomous deletes every CLOSED autonomous cycle for thread beyond the most recent keep -
 // ambient self-check cycling that piles up over time, not deliberately authored (directed) work.
 // Directed cycles and the currently active one (ClosedAt == nil) are never touched, by
