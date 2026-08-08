@@ -52,6 +52,12 @@ binary wherever you keep tools you run from anywhere.
    the deadline simply arrived first, something honest gets written here - "no results by the
    deadline" is itself a valid result, not an error state.
 
+Coming back to a project you haven't touched in a while? Run `kata orient` first - it prints
+usage, the current active cycle (if any), and the most recently closed cycle (if any), in that
+order, and never errors just because either one is empty. That's the "what does this do, am I
+mid-cycle, what did I just decide" habit as one deterministic command instead of three remembered
+ones.
+
 ## Walkthrough
 
 ```sh
@@ -131,6 +137,7 @@ than duplicated here. Short version:
 | `close-expired [results]` | Close honestly once the deadline has passed, complete or not |
 | `active` | Show the current open cycle |
 | `history` | Show the most recently closed cycle |
+| `orient` | Re-orientation as one command: usage + active + history, in order; never errors on an empty active/history state |
 | `log [keyword]` | List every closed cycle, newest first; `keyword` filters by substring across Challenge/Target/Current/Expectations/Results |
 
 ## Storage and scope

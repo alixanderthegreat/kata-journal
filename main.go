@@ -129,6 +129,8 @@ func run(store *kata.Store, verb string, args []string) error {
 		return printCycle(c)
 	case "log":
 		return cmdLog(ctx, store, thread, args)
+	case "orient":
+		return cmdOrient(ctx, store, thread)
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -306,10 +308,54 @@ func cmdLog(ctx context.Context, store *kata.Store, thread string, args []string
 	return nil
 }
 
+// cmdOrient is the deterministic codification of a re-orientation habit that otherwise lives only
+// in a human/agent's memory: usage, then active, then history, in one call. Unlike `active` and
+// `history` on their own, it never errors on an empty state - "no active cycle" and "no closed
+// cycle yet" are exactly what a caller re-orienting at the very start of a project needs to see,
+// not failure conditions.
+func cmdOrient(ctx context.Context, store *kata.Store, thread string) error {
+	usage()
+
+	fmt.Println()
+	active, err := store.Active(ctx, thread)
+	if err != nil {
+		return err
+	}
+	if active == nil {
+		fmt.Printf("(no active cycle for thread %q)\n", thread)
+	} else {
+		if err := printCycle(active); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println()
+	last, err := store.LastClosed(ctx, thread)
+	if err != nil {
+		return err
+	}
+	if last == nil {
+		fmt.Printf("(no closed cycle yet for thread %q)\n", thread)
+	} else {
+		if err := printCycle(last); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func usage() {
 	fmt.Print(`kata - a standalone structured-planning tool
 
 Usage: kata <verb> [args...]
+
+Re-orientation: run 'kata orient' first thing, every time - it prints this usage text, the
+current active cycle (if any), and the most recently closed cycle (if any), in that order. That's
+the same three-step habit of checking "what does this tool do", "am I already mid-cycle", and
+"what did I just decide" that you'd otherwise have to remember to do by hand as 'kata', 'kata
+active', 'kata history' - orient just makes it one deterministic command instead of a memorized
+ritual.
 
 Storage: a bbolt file at ./.kata/kata.db by default (override with KATA_DB_PATH) - no server to
 start or stop, each invocation opens the file, does one thing, and closes.
@@ -355,6 +401,8 @@ Verbs:
                                  gets an honest "no results by the deadline" default
   active                        show the current open cycle
   history                       show the most recently closed cycle
+  orient                        the re-orientation habit as one command: usage + active + history,
+                                 in order; never errors on an empty active/history state
   log [keyword]                  list every closed cycle, newest first, as a JSON array;
                                  keyword filters case-insensitively across Challenge, Target,
                                  Current, Expectations, and Results - a plain substring match,
