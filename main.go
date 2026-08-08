@@ -82,10 +82,14 @@ func run(store *kata.Store, verb string, args []string) error {
 		return cmdText(args, "obstacle", func(text string) error {
 			return store.AddObstacle(ctx, thread, text)
 		})
+	case "edit-obstacle":
+		return cmdEditObstacle(ctx, store, thread, args)
 	case "test":
 		return cmdText(args, "test", func(text string) error {
 			return store.AddTestItem(ctx, thread, text)
 		})
+	case "edit-test":
+		return cmdEditTestItem(ctx, store, thread, args)
 	case "expectations":
 		return cmdExpectations(ctx, store, thread, args)
 	case "complete":
@@ -171,6 +175,41 @@ func cmdText(args []string, verb string, fn func(string) error) error {
 // cmdExpectations sets what the Test as a whole is expected to achieve, and optionally, in the
 // same call, how long that's expected to take - a time estimate is itself part of the
 // expectation, not a separate unrelated setting.
+// cmdEditObstacle rewrites one Obstacle's text by its position in the active cycle's list -
+// Obstacles carry no id of their own (see kata.Obstacle), so the index a caller sees via `kata
+// active`/`kata history` is the address.
+func cmdEditObstacle(ctx context.Context, store *kata.Store, thread string, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: kata edit-obstacle <index> <text>")
+	}
+	index, err := strconv.Atoi(args[0])
+	if err != nil {
+		return fmt.Errorf("index must be an integer: %w", err)
+	}
+	if err := store.EditObstacle(ctx, thread, index, args[1]); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
+// cmdEditTestItem rewrites one Test item's text by id. Refused by the store once that item is
+// Done - see kata.Store.EditTestItem's own doc comment on why.
+func cmdEditTestItem(ctx context.Context, store *kata.Store, thread string, args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: kata edit-test <item_id> <text>")
+	}
+	id, err := strconv.Atoi(args[0])
+	if err != nil {
+		return fmt.Errorf("item_id must be an integer: %w", err)
+	}
+	if err := store.EditTestItem(ctx, thread, id, args[1]); err != nil {
+		return err
+	}
+	fmt.Println("ok")
+	return nil
+}
+
 func cmdExpectations(ctx context.Context, store *kata.Store, thread string, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata expectations <text> [deadline_minutes]")
@@ -301,8 +340,12 @@ Verbs:
   target <target_condition>      open a cycle and set its Target Condition in one step
   condition <text>              set Current Condition
   obstacle <text>               append one Obstacle - context, not paired 1:1 with Test items
+  edit-obstacle <index> <text>  rewrite an Obstacle's text by its position (see 'active'/'history');
+                                 records edited_at rather than silently overwriting
   test <text>                   append one Test item - a move toward Target, not a response to
                                  any one Obstacle
+  edit-test <item_id> <text>    rewrite a Test item's text; refused once that item is complete -
+                                 its Results is the record of what happened, not to be rewritten
   expectations <text> [deadline_minutes]
                                  deadline_minutes replaces the placeholder set by 'target'
   complete <item_id> [results]

@@ -494,6 +494,112 @@ func TestLegacyCorruptedRowSelfHeals(t *testing.T) {
 	}
 }
 
+// TestEditObstacle proves EditObstacle rewrites text in place, stamps EditedAt, leaves
+// RecordedAt untouched, and rejects an out-of-range index without touching the cycle.
+func TestEditObstacle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kata.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	thread := "thread-a"
+	deadline := time.Now().Add(time.Hour)
+
+	if _, err := s.Start(ctx, thread, "directed", "c", "t", "cur", deadline); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.AddObstacle(ctx, thread, "a typo-ridden obstalce"); err != nil {
+		t.Fatalf("AddObstacle: %v", err)
+	}
+	before, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active: %v", err)
+	}
+	recordedAt := before.Obstacles[0].RecordedAt
+	if before.Obstacles[0].EditedAt != nil {
+		t.Fatal("expected EditedAt to be nil before any edit")
+	}
+
+	if err := s.EditObstacle(ctx, thread, 99, "out of range"); err == nil {
+		t.Fatal("expected error editing an out-of-range obstacle index")
+	}
+
+	if err := s.EditObstacle(ctx, thread, 0, "a corrected obstacle"); err != nil {
+		t.Fatalf("EditObstacle: %v", err)
+	}
+	after, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active after edit: %v", err)
+	}
+	if after.Obstacles[0].Text != "a corrected obstacle" {
+		t.Fatalf("expected edited text, got %q", after.Obstacles[0].Text)
+	}
+	if after.Obstacles[0].EditedAt == nil {
+		t.Fatal("expected EditObstacle to stamp EditedAt")
+	}
+	if !after.Obstacles[0].RecordedAt.Equal(recordedAt) {
+		t.Fatalf("expected RecordedAt to stay untouched, got %v want %v", after.Obstacles[0].RecordedAt, recordedAt)
+	}
+}
+
+// TestEditTestItem proves EditTestItem rewrites a still-open item's text and stamps EditedAt,
+// but refuses once that item is Done - editing it after completion would rewrite the wording
+// its Results was actually recorded against.
+func TestEditTestItem(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kata.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	thread := "thread-a"
+	deadline := time.Now().Add(time.Hour)
+
+	if _, err := s.Start(ctx, thread, "directed", "c", "t", "cur", deadline); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.AddTestItem(ctx, thread, "tset the thign"); err != nil {
+		t.Fatalf("AddTestItem: %v", err)
+	}
+
+	if err := s.EditTestItem(ctx, thread, 99, "no such item"); err == nil {
+		t.Fatal("expected error editing a nonexistent test item id")
+	}
+
+	if err := s.EditTestItem(ctx, thread, 0, "test the thing"); err != nil {
+		t.Fatalf("EditTestItem: %v", err)
+	}
+	active, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active: %v", err)
+	}
+	if active.Test[0].Text != "test the thing" {
+		t.Fatalf("expected edited text, got %q", active.Test[0].Text)
+	}
+	if active.Test[0].EditedAt == nil {
+		t.Fatal("expected EditTestItem to stamp EditedAt")
+	}
+
+	if err := s.CompleteItem(ctx, thread, 0, "done"); err != nil {
+		t.Fatalf("CompleteItem: %v", err)
+	}
+	if err := s.EditTestItem(ctx, thread, 0, "trying to rewrite history"); err == nil {
+		t.Fatal("expected EditTestItem to refuse editing an already-completed item")
+	}
+	untouched, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active after refused edit: %v", err)
+	}
+	if untouched.Test[0].Text != "test the thing" {
+		t.Fatalf("refused edit must not change the stored text, got %q", untouched.Test[0].Text)
+	}
+}
+
 // TestLegacyObstacleDecodesAsBareString reproduces a real pre-existing row shape: every cycle
 // closed before Obstacle gained its own type stored "obstacles" as a bare JSON array of strings
 // (`["text"]`), not objects. Those rows must keep decoding cleanly - with a zero RecordedAt, not

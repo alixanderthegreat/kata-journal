@@ -122,7 +122,9 @@ than duplicated here. Short version:
 | `target <target_condition>` | Open a cycle and set its Target Condition in one step |
 | `condition <text>` | Set Current Condition |
 | `obstacle <text>` | Append one Obstacle |
+| `edit-obstacle <index> <text>` | Rewrite an Obstacle's text by its position; stamps `edited_at` |
 | `test <text>` | Append one Test item |
+| `edit-test <item_id> <text>` | Rewrite a Test item's text; refused once that item is complete |
 | `expectations <text> [deadline_minutes]` | Set Expectations; optionally set/replace the Deadline |
 | `complete <item_id> [results]` | Mark a Test item done |
 | `close <results>` | Close the cycle - requires every Test item complete |
@@ -153,3 +155,6 @@ stepping on each other's active cycle.
   re-exported every session.
 - **No semantic search, on purpose.** `kata log` filters by plain substring, not embeddings - a
   personal-scale journal doesn't have the volume to justify it, and it's one less dependency.
+- **Edits are audited, not silent.** `edit-obstacle`/`edit-test` stamp `edited_at` rather than
+  quietly overwriting text, and `edit-test` refuses once an item is complete - its `results` is
+  the record of what actually happened, not something a later edit should be able to rewrite.

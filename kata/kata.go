@@ -53,13 +53,15 @@ type TestItem struct {
 	Results     string     `json:"results,omitempty"` // set once, at completion - never touched again
 	CreatedAt   time.Time  `json:"created_at,omitempty"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	EditedAt    *time.Time `json:"edited_at,omitempty"` // set by EditTestItem - nil means never edited
 }
 
 // Obstacle is one entry in a cycle's flat, unordered obstacle list (see
 // package doc) - a plain string plus when it was actually noticed.
 type Obstacle struct {
-	Text       string    `json:"text"`
-	RecordedAt time.Time `json:"recorded_at,omitempty"`
+	Text       string     `json:"text"`
+	RecordedAt time.Time  `json:"recorded_at,omitempty"`
+	EditedAt   *time.Time `json:"edited_at,omitempty"` // set by EditObstacle - nil means never edited
 }
 
 // UnmarshalJSON accepts either the current object shape ({"text":...,"recorded_at":...}) or a
@@ -501,6 +503,57 @@ func (s *Store) AddObstacle(ctx context.Context, thread, obstacle string) error 
 	}
 	c.Obstacles = append(c.Obstacles, Obstacle{Text: obstacle, RecordedAt: time.Now()})
 	return s.update(ctx, thread, c)
+}
+
+// EditObstacle rewrites the text of one entry in the active cycle's Obstacle list, addressed by
+// its position in that list (Obstacles carry no id of their own - see Obstacle). Sets EditedAt
+// rather than silently overwriting: a later reader (human or agent) should be able to tell an
+// obstacle was revised after RecordedAt, not just trust the current text as if it were original -
+// an honest audit trail without going as far as keeping full version history.
+func (s *Store) EditObstacle(ctx context.Context, thread string, index int, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	c, err := s.requireActiveLocked(ctx, thread)
+	if err != nil {
+		return err
+	}
+	if index < 0 || index >= len(c.Obstacles) {
+		return fmt.Errorf("obstacle index %d out of range (cycle %d has %d obstacle(s))", index, c.ID, len(c.Obstacles))
+	}
+	now := time.Now()
+	c.Obstacles[index].Text = text
+	c.Obstacles[index].EditedAt = &now
+	return s.update(ctx, thread, c)
+}
+
+// EditTestItem rewrites the text of one item in the active cycle's Test, addressed by id. Refuses
+// once the item is Done: Results is the record of what actually happened against that item's
+// wording at the time it was completed (see TestItem's own doc comment - "set once, never touched
+// again"), so rewriting the item's Text afterward would be exactly the kind of revisionist history
+// this whole edit path exists to avoid - not "hard to fix a typo" but "hard to quietly rewrite what
+// was tested." Same EditedAt audit trail as EditObstacle for the still-open case.
+func (s *Store) EditTestItem(ctx context.Context, thread string, itemID int, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	c, err := s.requireActiveLocked(ctx, thread)
+	if err != nil {
+		return err
+	}
+	for i := range c.Test {
+		if c.Test[i].ID != itemID {
+			continue
+		}
+		if c.Test[i].Done {
+			return fmt.Errorf("test item %d already completed - editing it now would rewrite history; its Results is the record of what actually happened", itemID)
+		}
+		now := time.Now()
+		c.Test[i].Text = text
+		c.Test[i].EditedAt = &now
+		return s.update(ctx, thread, c)
+	}
+	return fmt.Errorf("test item %d not found in cycle %d", itemID, c.ID)
 }
 
 // AddTestItem appends one item to the active cycle's Test - a move toward Target Condition, not
