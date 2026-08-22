@@ -118,6 +118,8 @@ func run(store *kata.Store, verb string, args []string) error {
 			return fmt.Errorf("no active cycle for thread %q", thread)
 		}
 		return printCycle(c)
+	case "show":
+		return cmdShow(ctx, store, thread, args)
 	case "history":
 		c, err := store.LastClosed(ctx, thread)
 		if err != nil {
@@ -276,6 +278,63 @@ func printCycle(c *kata.Cycle) error {
 	return nil
 }
 
+// cmdShow prints one field of the active cycle as plain text, not the full JSON `active` prints -
+// the direct answer to "what's the target/challenge/obstacles/test right now" without piping
+// through jq for it every time, which is the exact friction this exists to remove. Scoped to the
+// active cycle only (same scope as `active` itself); `log`/`history` already cover closed cycles.
+func cmdShow(ctx context.Context, store *kata.Store, thread string, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: kata show <field> (challenge, target, current, obstacles, test, expectations, results, deadline)")
+	}
+	c, err := store.Active(ctx, thread)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		return fmt.Errorf("no active cycle for thread %q", thread)
+	}
+	switch args[0] {
+	case "challenge":
+		fmt.Println(c.Challenge)
+	case "target", "target_condition":
+		fmt.Println(c.TargetCondition)
+	case "current", "condition", "current_condition":
+		fmt.Println(c.CurrentCondition)
+	case "obstacles":
+		if len(c.Obstacles) == 0 {
+			fmt.Println("(no obstacles recorded)")
+			return nil
+		}
+		for i, o := range c.Obstacles {
+			fmt.Printf("%d: %s\n", i, o.Text)
+		}
+	case "test":
+		if len(c.Test) == 0 {
+			fmt.Println("(no test items)")
+			return nil
+		}
+		for _, item := range c.Test {
+			mark := " "
+			if item.Done {
+				mark = "x"
+			}
+			fmt.Printf("[%s] %d: %s\n", mark, item.ID, item.Text)
+			for _, r := range item.Results {
+				fmt.Printf("    -> %s\n", r.Text)
+			}
+		}
+	case "expectations":
+		fmt.Println(c.Expectations)
+	case "results":
+		fmt.Println(c.Results)
+	case "deadline":
+		fmt.Println(c.Deadline.Format(time.RFC3339))
+	default:
+		return fmt.Errorf("unknown field %q (try: challenge, target, current, obstacles, test, expectations, results, deadline)", args[0])
+	}
+	return nil
+}
+
 // cmdLog lists every closed cycle for thread, newest first - history further back than
 // LastClosed's single most-recent one. An optional keyword filters case-insensitively across
 // Challenge, Target Condition, Current Condition, Expectations, and Results - a plain substring
@@ -400,6 +459,10 @@ Verbs:
                                  incomplete Test items; supply results if you have them, otherwise
                                  gets an honest "no results by the deadline" default
   active                        show the current open cycle
+  show <field>                  print one field of the active cycle as plain text, not JSON -
+                                 challenge, target, current, obstacles, test, expectations,
+                                 results, or deadline - so checking what the target/obstacles/test
+                                 actually are doesn't need piping 'active' through jq every time
   history                       show the most recently closed cycle
   orient                        the re-orientation habit as one command: usage + active + history,
                                  in order; never errors on an empty active/history state
