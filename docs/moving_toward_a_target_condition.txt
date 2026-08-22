@@ -1,0 +1,76 @@
+Moving Toward a Target Condition
+(an original summary of the idea, not a reproduction of any book - see attribution at the end)
+
+THE PATH IS NEVER FULLY VISIBLE
+
+Once a target condition exists, the honest starting position is that you don't yet know exactly
+how you'll reach it. That's not a planning failure - it's just true, the same way a pilot can't
+chart every gust of wind between cruising altitude and the runway before taking off. Whatever plan
+gets made will be wrong in some of its details the moment reality pushes back on it. The useful
+move isn't a better plan up front; it's shorter feedback loops once you're moving.
+
+EXPERIMENT, DON'T DEBATE
+
+Hypotheses get tested by actually doing something and checking what happened - not by discussing
+what probably would happen (Rother's own book has a name for this: "testing over talking"). This
+sounds obvious and gets violated constantly, usually dressed up
+as "research." A single query to a language model, phrased casually, answered without any real
+verification, isn't testing - it's a guess with better formatting. That happened directly in this
+project: an early orientation step asked one AI system a single low-effort question and treated the
+answer as fact, including a claimed community that turned out not to check out on closer look.
+Real testing meant going back, verifying every concrete claim independently, and pushing a second,
+harder pass that actively looked for what the first answer got wrong - which is how the mistake
+actually got found.
+
+GO AND SEE
+
+Secondhand information, however confident it sounds, is not a substitute for looking at the actual
+thing yourself. A model's opinion about which online communities are receptive is not the same as
+reading that community's own posted rules. In this project, exactly that gap mattered: a rule
+banning links to certain large platforms - discovered only by reading the actual rules directly -
+would have been missed by any amount of secondhand research, because it was specific, current, and
+non-obvious. "Go and see" doesn't mean distrust everything; it means treat a claim as unverified
+until you or someone trustworthy has actually looked.
+
+DON'T WAIT FOR THE PERFECT STEP
+
+Once you know roughly what's wrong, the instinct is often to fix it properly before doing anything
+else - redesign the thing, polish the pitch, build the better version, THEN act. Resist that. A
+rough, provisional step taken now teaches you more than a polished one taken later, because it
+surfaces the next real obstacle immediately instead of after a delay spent perfecting something
+whose flaws might not even have been the actual problem. A book with an admittedly rushed cover and
+title still goes out as-is on day one, not after a redesign - because the untested variable was
+never the design, it was whether anyone outside a small circle had ever actually seen it.
+
+RAPID, SMALL, CHECKED CYCLES
+
+Long stretches between checking in on progress produce very little real learning, because by the
+time you look, the specific cause of whatever went wrong is gone, mixed in with everything else
+that happened in between. Short cycles - do one small thing, check it soon, adjust - keep the
+cause and effect close enough together to actually see clearly. This is also why a target condition
+with a very long deadline is usually a mistake: it removes the pressure to check in frequently,
+which is where almost all the real information comes from.
+
+A WAY TO KEEP MOVING WHEN STUCK
+
+A short set of questions, credited to Rother's own formulation, works as a fast way to re-orient at
+any point in a cycle: What's the target condition? What's actually true right now? What's the one
+obstacle being worked on at this moment - not all of them, just the one in front of you? What's the
+next concrete step? And when will you actually check what that step taught you? Answering these in
+order, honestly, is usually enough to unstick a cycle that's drifted into planning instead of
+moving.
+
+WHAT COUNTS AS A GOOD RESULT
+
+A prediction that turns out wrong is not a failed effort - it's the more informative outcome of the
+two, because it means something was actually learned rather than just confirmed. A stated
+prediction of "nothing will happen" that turns out true is a real, useful, honestly-earned fact
+after however long the thing sat untested. The same prediction turning out false is even more
+useful, because it means the model of the situation was incomplete in a way now worth
+understanding. Either way beats never having made a falsifiable prediction at all.
+
+Attribution: the underlying framework here - PDCA, go-and-see, and the five-question routine for
+moving toward a target condition - comes from Mike Rother's book "Toyota Kata" (2009). This
+document is an original restatement of the idea, using this project's own real examples, for use
+with this repo's own kata-journal tool - not a reproduction of the book's text. Read the original
+for the full treatment, including its own worked examples from manufacturing environments.

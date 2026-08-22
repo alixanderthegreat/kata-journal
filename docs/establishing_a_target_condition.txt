@@ -1,0 +1,53 @@
+Establishing a Target Condition
+(an original summary of the idea, not a reproduction of any book - see attribution at the end)
+
+WHAT A TARGET CONDITION ACTUALLY IS
+
+A target condition describes a state you want to be true - a pattern of operating, checkable by
+looking at it - not a number you want to hit. That distinction is the whole idea, and it's easy
+to get backwards.
+
+Say the goal is "sell more of something." The tempting way to write that down is as a target: a
+count, a deadline, a quota - "20 sales by Friday." That's an outcome. It tells you what to hope
+for. It does not tell you what has to be TRUE, day to day, for that outcome to become reachable.
+
+A target condition instead names the operating state: "a repeatable, checkable, daily practice
+exists for putting this in front of a real stranger, regardless of which channel it takes." That's
+not a number. It's a description of a process running the way you want it to run. You can look at
+any given day and ask "does that condition exist right now, or not" - which you cannot honestly do
+with a target like "20 sales," because a target only resolves at the finish line, and by then it's
+too late to have learned anything along the way.
+
+WHY THE DIFFERENCE MATTERS
+
+An outcome target can be hit by luck, by gaming it, or by a single insincere transaction, and none
+of that tells you anything real about whether the underlying capability exists. If the target is
+"one book sold," having a family member buy a copy as a gift satisfies it completely while proving
+nothing. A target condition built around a real, repeatable, verifiable practice can't be gamed
+the same way - the whole point is the pattern holding up under real conditions, not one lucky
+instance clearing a bar.
+
+There's also a trap worth naming directly: it's tempting to write the SOLUTION into the target
+condition - "post daily on Reddit" instead of "a repeatable practice exists." Don't. The moment a
+specific channel or method gets baked into the target condition, you've quietly turned it into a
+plan, and plans are exactly the thing that shouldn't survive first contact with reality unchanged.
+Leave the "how" out. That's what Test items are for - the countermeasures get worked out once
+you're actually moving, not decided in advance and then defended against evidence.
+
+HOW MUCH TO SPECIFY, AND HOW FAR OUT
+
+It's normal, even correct, not to know exactly how a target condition will be reached at the
+moment it's set. If the path were already obvious, there'd be nothing to learn by pursuing it -
+you'd just be executing a known plan, not running a real experiment. Being unsure how you'll get
+there is a sign the target condition is pitched right, not a gap to panic-fill before starting.
+
+Keep the time horizon short, especially early on - days, not months. A target condition that
+reaches too far into the future needs a real plan to bridge the gap, which reintroduces the same
+problem: a long plan predicts too much and adapts too little. A short one gets tested, checked, and
+revised fast, which is the entire mechanism that makes this useful instead of just aspirational.
+
+Attribution: the underlying framework here - target condition as distinct from target, and the
+role it plays in structured improvement work - comes from Mike Rother's book "Toyota Kata" (2009).
+This document is an original restatement of the idea for use with this repo's own kata-journal
+tool, not a reproduction of the book's text. Read the original for the full treatment, including
+its own worked examples from manufacturing environments.
