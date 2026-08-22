@@ -426,19 +426,39 @@ Fields, in the canonical form:
   Challenge          the why. Set once with 'kata challenge <text>', persisted into the project's
                      own db - a fixed north star, not a per-cycle variable you retype each time.
                      Required before 'target' will work.
-  Target Condition   the goal, phrased as an end-state. Setting it is what opens a cycle - there
-                     is no separate "start" step.
+  Target Condition   how the process should be operating, phrased as a checkable state - NOT
+                     the same as a target (an outcome count, e.g. "sold 20"). A target condition
+                     names where you want to be and leaves out how you'll get there - that's what
+                     Test items are for. Setting it is what opens a cycle - there is no separate
+                     "start" step. Source: docs/establishing_a_target_condition.txt
+                     (Rother, Toyota Kata ch. 5).
   Current Condition  where things stand right now - diagnostic detail/evidence belongs here,
                      not in Challenge.
   Obstacles          a flat, unordered causality list - NOT a checklist paired 1:1 with Test
                      items. Context/awareness, not action items to individually resolve.
   Test               items constructed holistically to move Current toward Target, informed
-                     by Obstacles but not indexed to them.
-  Expectations       what the Test as a whole achieves - one cycle-level field, not per-item.
-                     A time estimate (Deadline) can be set alongside it.
+                     by Obstacles but not indexed to them. A test item is a piece of the Test,
+                     not required to independently be a whole experiment - orientation, friction
+                     (e.g. account setup), the actual action, and logging can each be their own
+                     item. Prefer a provisional step now with whatever you have over a perfect
+                     one later, and firsthand observation ("go and see") over secondhand opinion
+                     or discussion about what might work - what Rother's own book calls "testing
+                     over talking". Source: docs/moving_toward_a_target_condition.txt
+                     (Rother, Toyota Kata ch. 6).
+  Expectations       what the Test as a whole achieves, and your actual predicted outcome -
+                     optimistic or pessimistic, doesn't matter which - stated in advance so
+                     Results can honestly be compared against it on close. An unstated prediction
+                     can't be confirmed or refuted; a stated one can, which is what makes this a
+                     real experiment and not just activity. A time estimate (Deadline) can be
+                     set alongside it.
   Results            the retrospective, recorded on close.
   Deadline           closes the cycle regardless of Test completion - no results by the
-                     deadline is itself a result, not an error state.
+                     deadline is itself a result, not an error state. 'target' sets a short
+                     placeholder deadline on purpose, not as a bug - a forcing function against
+                     set-it-and-forget-it targets. If it lapses before the rest of the cycle gets
+                     defined, that itself is real information. Use 'expectations <text>
+                     <minutes>' to replace it with a real one once you've actually thought about
+                     how long this should take.
 
 Verbs:
   challenge <text>               set the project's Challenge (see above) - once, not per cycle
@@ -453,7 +473,10 @@ Verbs:
                                  its Results is the record of what happened, not to be rewritten
   expectations <text> [deadline_minutes]
                                  deadline_minutes replaces the placeholder set by 'target'
-  complete <item_id> [results]
+  complete <item_id> [results]  marks a Test item done; calling it again on an already-done item
+                                 appends another result rather than overwriting or refusing it
+                                 (unlike edit-test) - a correction or follow-up becomes new
+                                 history, not a rewrite
   close <results>                requires every Test item complete (see close-expired otherwise)
   close-expired [results]        honest close once the deadline has actually passed, even with
                                  incomplete Test items; supply results if you have them, otherwise

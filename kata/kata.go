@@ -45,15 +45,55 @@ import (
 // achieve, not what each item individually proves. CreatedAt/CompletedAt exist so a cycle's Test
 // reads as a real timeline, not just an ID-ordered list - a legacy item decoded from before
 // these fields existed comes back with a zero CreatedAt and a nil CompletedAt, which is an
-// honest "unknown," not a fabricated guess.
+// honest "unknown," not a fabricated guess. CompletedAt stamps the FIRST completion only (see
+// CompleteItem) - each individual completion's own time lives on its ResultsEntry instead.
 type TestItem struct {
-	ID          int        `json:"id"`
-	Text        string     `json:"text"`
-	Done        bool       `json:"done"`
-	Results     string     `json:"results,omitempty"` // set once, at completion - never touched again
-	CreatedAt   time.Time  `json:"created_at,omitempty"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	EditedAt    *time.Time `json:"edited_at,omitempty"` // set by EditTestItem - nil means never edited
+	ID          int            `json:"id"`
+	Text        string         `json:"text"`
+	Done        bool           `json:"done"`
+	Results     ResultsHistory `json:"results,omitempty"` // every CompleteItem call appends - see CompleteItem
+	CreatedAt   time.Time      `json:"created_at,omitempty"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	EditedAt    *time.Time     `json:"edited_at,omitempty"` // set by EditTestItem - nil means never edited
+}
+
+// ResultsEntry is one recorded outcome for a TestItem - see ResultsHistory.
+type ResultsEntry struct {
+	Text       string    `json:"text"`
+	RecordedAt time.Time `json:"recorded_at,omitempty"`
+}
+
+// ResultsHistory is the ordered, oldest-first list of every outcome CompleteItem has recorded for
+// one TestItem. Found live (kata cycle 61, test item 0, this project's own dogfood use) that a
+// second, better CompleteItem call on an already-Done item silently clobbered the first honest
+// result with no trace - the opposite of EditTestItem's deliberate refusal to let Text be
+// rewritten after completion, and a real loss given the whole package's "don't sanitize the
+// record" posture (see package doc on Results/Deadline). CompleteItem now appends here instead of
+// overwriting a single string, so a correction is additional history, not erasure.
+//
+// Decodes from either its current array shape or a bare JSON string, the shape every TestItem's
+// Results was stored in before this existed - a legacy value decodes as one entry with a zero
+// RecordedAt (honest "unknown," not a fabricated guess - same convention Obstacle.UnmarshalJSON
+// already established for the same reason).
+type ResultsHistory []ResultsEntry
+
+func (rh *ResultsHistory) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		if text == "" {
+			*rh = nil
+			return nil
+		}
+		*rh = ResultsHistory{{Text: text}}
+		return nil
+	}
+	type alias ResultsHistory
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*rh = ResultsHistory(a)
+	return nil
 }
 
 // Obstacle is one entry in a cycle's flat, unordered obstacle list (see
@@ -529,10 +569,12 @@ func (s *Store) EditObstacle(ctx context.Context, thread string, index int, text
 
 // EditTestItem rewrites the text of one item in the active cycle's Test, addressed by id. Refuses
 // once the item is Done: Results is the record of what actually happened against that item's
-// wording at the time it was completed (see TestItem's own doc comment - "set once, never touched
-// again"), so rewriting the item's Text afterward would be exactly the kind of revisionist history
-// this whole edit path exists to avoid - not "hard to fix a typo" but "hard to quietly rewrite what
-// was tested." Same EditedAt audit trail as EditObstacle for the still-open case.
+// wording at the time it was completed, so rewriting the item's Text afterward would be exactly
+// the kind of revisionist history this whole edit path exists to avoid - not "hard to fix a typo"
+// but "hard to quietly rewrite what was tested." Same EditedAt audit trail as EditObstacle for the
+// still-open case. Note the asymmetry with CompleteItem, which is deliberate: Text describes what
+// was tested and must stay fixed once real results exist against it, but Results itself is
+// allowed to grow (see ResultsHistory) - a correction there is a second real event, not a rewrite.
 func (s *Store) EditTestItem(ctx context.Context, thread string, itemID int, text string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -611,7 +653,11 @@ func (s *Store) SetDeadline(ctx context.Context, thread string, deadline time.Ti
 	return s.update(ctx, thread, c)
 }
 
-// CompleteItem marks one Test item done by id.
+// CompleteItem marks one Test item done by id, appending a new ResultsEntry - calling this again
+// on an item that's already Done does NOT overwrite the previous result, it adds another one (see
+// ResultsHistory's own doc comment for why this matters and the live incident that found it).
+// CompletedAt is only stamped on the first completion; it marks when the item first became Done,
+// not when its Results were last touched - each entry's own RecordedAt covers that.
 func (s *Store) CompleteItem(ctx context.Context, thread string, itemID int, results string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -625,8 +671,10 @@ func (s *Store) CompleteItem(ctx context.Context, thread string, itemID int, res
 	for i := range c.Test {
 		if c.Test[i].ID == itemID {
 			c.Test[i].Done = true
-			c.Test[i].Results = results
-			c.Test[i].CompletedAt = &now
+			c.Test[i].Results = append(c.Test[i].Results, ResultsEntry{Text: results, RecordedAt: now})
+			if c.Test[i].CompletedAt == nil {
+				c.Test[i].CompletedAt = &now
+			}
 			found = true
 			break
 		}

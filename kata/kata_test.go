@@ -662,3 +662,124 @@ func TestLegacyObstacleDecodesAsBareString(t *testing.T) {
 		t.Fatal("expected the newly added obstacle to have a real RecordedAt")
 	}
 }
+
+// TestCompleteItemAppendsResultsHistory reproduces a real incident from this project's own
+// dogfood use (kata cycle 61, test item 0): calling CompleteItem a second time on an
+// already-Done item used to silently overwrite the first result with no trace - the opposite of
+// this package's own "don't sanitize the record" posture. It must now append instead, preserving
+// both, with CompletedAt staying pinned to the first completion.
+func TestCompleteItemAppendsResultsHistory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kata.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	thread := "thread-a"
+	deadline := time.Now().Add(time.Hour)
+
+	if _, err := s.Start(ctx, thread, "directed", "c", "t", "cur", deadline); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.AddTestItem(ctx, thread, "probe something"); err != nil {
+		t.Fatalf("AddTestItem: %v", err)
+	}
+
+	if err := s.CompleteItem(ctx, thread, 0, "first, low-effort pass"); err != nil {
+		t.Fatalf("CompleteItem (first): %v", err)
+	}
+	first, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active after first complete: %v", err)
+	}
+	if len(first.Test[0].Results) != 1 {
+		t.Fatalf("expected 1 results entry after first completion, got %d: %+v", len(first.Test[0].Results), first.Test[0].Results)
+	}
+	firstCompletedAt := first.Test[0].CompletedAt
+	if firstCompletedAt == nil {
+		t.Fatal("expected CompletedAt to be stamped on first completion")
+	}
+
+	if err := s.CompleteItem(ctx, thread, 0, "second, verified pass"); err != nil {
+		t.Fatalf("CompleteItem (second): %v", err)
+	}
+	second, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active after second complete: %v", err)
+	}
+	if len(second.Test[0].Results) != 2 {
+		t.Fatalf("expected 2 results entries after second completion, got %d: %+v", len(second.Test[0].Results), second.Test[0].Results)
+	}
+	if second.Test[0].Results[0].Text != "first, low-effort pass" {
+		t.Fatalf("first result was overwritten instead of preserved: %+v", second.Test[0].Results)
+	}
+	if second.Test[0].Results[1].Text != "second, verified pass" {
+		t.Fatalf("expected second result appended, got %+v", second.Test[0].Results)
+	}
+	if !second.Test[0].CompletedAt.Equal(*firstCompletedAt) {
+		t.Fatalf("expected CompletedAt to stay at the first completion time, got %v (was %v)", second.Test[0].CompletedAt, firstCompletedAt)
+	}
+}
+
+// TestLegacyTestItemResultsDecodesAsBareString reproduces a real pre-existing row shape: every
+// TestItem completed before Results became a history stored it as a bare JSON string, not an
+// array of entries. Those rows must keep decoding cleanly - as one entry with a zero RecordedAt,
+// not an error - and a later CompleteItem call must append alongside it without losing it.
+func TestLegacyTestItemResultsDecodesAsBareString(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kata.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	thread := "thread-a"
+	legacyData := []byte(`{"id":0,"kind":"directed","thread":"thread-a","challenge":"Play.","target_condition":"t","current_condition":"c","test":[{"id":0,"text":"an old test item","done":true,"results":"an old result, recorded before results were a history"}],"deadline":"2099-01-01T00:00:00Z","started_at":"2026-01-01T00:00:00Z"}`)
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := threadBucketCreate(tx, thread)
+		if err != nil {
+			return err
+		}
+		return bucket.Put(idKey(0), legacyData)
+	}); err != nil {
+		t.Fatalf("plant legacy row: %v", err)
+	}
+
+	active, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active: %v", err)
+	}
+	if active == nil {
+		t.Fatal("expected the planted legacy row to be found")
+	}
+	if len(active.Test) != 1 || len(active.Test[0].Results) != 1 {
+		t.Fatalf("expected exactly one decoded test item with one results entry, got %+v", active.Test)
+	}
+	if active.Test[0].Results[0].Text != "an old result, recorded before results were a history" {
+		t.Fatalf("legacy results text lost on decode: %+v", active.Test[0].Results[0])
+	}
+	if !active.Test[0].Results[0].RecordedAt.IsZero() {
+		t.Fatalf("expected a zero RecordedAt for a legacy result, got %v", active.Test[0].Results[0].RecordedAt)
+	}
+
+	// A completion afterward must append, sitting alongside the legacy entry without disturbing it.
+	if err := s.CompleteItem(ctx, thread, 0, "a real completion, recorded now"); err != nil {
+		t.Fatalf("CompleteItem: %v", err)
+	}
+	updated, err := s.Active(ctx, thread)
+	if err != nil {
+		t.Fatalf("Active after CompleteItem: %v", err)
+	}
+	if len(updated.Test[0].Results) != 2 {
+		t.Fatalf("expected two results entries after completing, got %+v", updated.Test[0].Results)
+	}
+	if !updated.Test[0].Results[0].RecordedAt.IsZero() {
+		t.Fatalf("legacy result's RecordedAt should remain zero, got %v", updated.Test[0].Results[0].RecordedAt)
+	}
+	if updated.Test[0].Results[1].RecordedAt.IsZero() {
+		t.Fatal("expected the newly appended result to have a real RecordedAt")
+	}
+}
