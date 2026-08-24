@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +18,45 @@ import (
 
 	"github.com/alixanderthegreat/kata-journal/kata"
 )
+
+// embeddedSkill is this repo's own .claude/skills/kata-practice/SKILL.md, baked into the binary
+// at build time - a single source of truth, not a copy that can drift. This is what lets the
+// judgment-call guidance (Target vs Target Condition, Test items composing a whole, the deadline
+// placeholder being intentional, etc.) travel with `bin/kata` wherever it's vendored into another
+// project, instead of staying stranded in this repo's own .claude/skills/ where a session rooted
+// in a different project never discovers it (Claude Code's skill discovery is project-scoped).
+//
+//go:embed .claude/skills/kata-practice/SKILL.md
+var embeddedSkill string
+
+// skillPath mirrors dbPath's own "dotdir under the current working directory" convention -
+// whatever project this binary is being run from is where the skill gets installed, same as
+// .kata/kata.db already does.
+func skillPath() string {
+	return filepath.Join(".claude", "skills", "kata-practice", "SKILL.md")
+}
+
+// ensureSkillInstalled writes the embedded skill file into the current project if it isn't there
+// yet - checked (cheaply, one Stat) on every invocation, matching the user's own framing: "kata or
+// any kata <command> checks for the skill in the root directory." Silent when already present;
+// only prints on an actual install so this doesn't add noise to every command. Non-fatal on
+// failure (e.g. a read-only checkout) - a missing skill file shouldn't block the actual command
+// the user ran.
+func ensureSkillInstalled() {
+	path := skillPath()
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "kata: install skill:", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(embeddedSkill), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "kata: install skill:", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "kata: installed kata-practice skill at", path)
+}
 
 // dbPath defaults to a dotdir under the current working directory - the same "each project gets
 // its own scope" convention as .git itself, so running this from inside any project's own repo
@@ -41,6 +81,11 @@ func thread() string {
 }
 
 func main() {
+	// Before the arg check, not after - a bare `kata` with no args is itself one of the
+	// invocations the user asked this to cover ("kata or any kata <command>"), and it currently
+	// exits before reaching anything below this point.
+	ensureSkillInstalled()
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
