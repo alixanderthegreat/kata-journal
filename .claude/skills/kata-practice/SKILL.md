@@ -60,7 +60,9 @@ timeframe - not before.
 
 ## CLI behavior worth knowing before it surprises you
 
-- `challenge` is set once for the whole project db, not per cycle - a fixed north star.
+- `challenge` is set once per project, not per cycle - a fixed north star. Scoped by project (the
+  repo's git root path, or cwd if not a git repo), not by thread - every thread within one project
+  shares the same Challenge, so several agents/workstreams on the same project never fork it.
 - `edit-obstacle` and `edit-test` stamp `edited_at` rather than silently overwriting; `edit-test`
   additionally refuses outright once that item is `Done`, because rewriting what was tested after
   the fact is exactly the revisionism this tool exists to prevent.
@@ -85,7 +87,19 @@ timeframe - not before.
   common "what's the target/obstacles/test right now" check. `show test` prints each item's
   `ResultsHistory` indented underneath it, not just the text and done/not-done mark - it missed
   that on the first pass and was fixed once noticed, since a status check that hides what actually
-  happened isn't much of a status check.
+  happened isn't much of a status check. `show challenge` is the one field that doesn't need an
+  active cycle at all (Challenge is project-level, not per-cycle) and works even with none open -
+  every other field still requires one, same as `active` itself.
+- The db file is `./.kata/kata.db` if one already exists there, else `~/.kata/kata.db` - a single
+  consolidated store shared by every project that hasn't been given its own local db (KATA_DB_PATH
+  overrides either case). The default thread follows suit: a local db still defaults to a single
+  fixed `"default"` thread as always, but the shared home db instead defaults to the current
+  project's git root path (or cwd if not in a git repo), so unrelated projects land in separate
+  threads automatically instead of colliding in one shared bucket. KATA_THREAD overrides either
+  case outright - e.g. for several parallel threads (one per agent/workstream) within one project's
+  own scope. Challenge itself is scoped by project (the same git-root/cwd identity), not by
+  thread, and independent of KATA_THREAD - every thread within a project shares that project's one
+  Challenge, so it can't accidentally fork per agent/workstream the way cycles can.
 
 ## Don't sanitize the record
 

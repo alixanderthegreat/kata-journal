@@ -783,3 +783,54 @@ func TestLegacyTestItemResultsDecodesAsBareString(t *testing.T) {
 		t.Fatal("expected the newly appended result to have a real RecordedAt")
 	}
 }
+
+// TestChallengeScopedByProject proves Challenge became a per-project setting without breaking any
+// db that predates that change: a legacy flat rootChallengeKey (planted directly, the way an
+// existing db like this repo's own already has one) must still be readable as a fallback for any
+// project that hasn't set its own Challenge yet, but the moment one project sets its own, it must
+// stop seeing the legacy value and no other project may be affected by that write.
+func TestChallengeScopedByProject(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "kata.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket(metaBucket).Put(rootChallengeKey, []byte("legacy challenge"))
+	}); err != nil {
+		t.Fatalf("plant legacy challenge: %v", err)
+	}
+
+	for _, project := range []string{"project-a", "project-b"} {
+		got, err := s.Challenge(ctx, project)
+		if err != nil {
+			t.Fatalf("Challenge(%q): %v", project, err)
+		}
+		if got != "legacy challenge" {
+			t.Fatalf("Challenge(%q) = %q, want fallback to legacy value", project, got)
+		}
+	}
+
+	if err := s.SetChallenge(ctx, "project-a", "project A's own challenge"); err != nil {
+		t.Fatalf("SetChallenge: %v", err)
+	}
+
+	gotA, err := s.Challenge(ctx, "project-a")
+	if err != nil {
+		t.Fatalf("Challenge(project-a): %v", err)
+	}
+	if gotA != "project A's own challenge" {
+		t.Fatalf("Challenge(project-a) = %q, want the newly-set project value, not the legacy fallback", gotA)
+	}
+
+	gotB, err := s.Challenge(ctx, "project-b")
+	if err != nil {
+		t.Fatalf("Challenge(project-b): %v", err)
+	}
+	if gotB != "legacy challenge" {
+		t.Fatalf("Challenge(project-b) = %q, want it still on the legacy fallback, unaffected by project-a's write", gotB)
+	}
+}

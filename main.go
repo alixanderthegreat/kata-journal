@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -59,24 +60,59 @@ func ensureSkillInstalled() {
 	fmt.Fprintln(os.Stderr, "kata: installed kata-practice skill at", path)
 }
 
-// dbPath defaults to a dotdir under the current working directory - the same "each project gets
-// its own scope" convention as .git itself, so running this from inside any project's own repo
-// just works with zero configuration. Override via KATA_DB_PATH for a shared/central store.
-func dbPath() string {
+// resolveStorage picks the db file, the project (Challenge's scope), and the default thread
+// (cycles' scope) together, since which thread default is right depends on which db is in play.
+// An existing ./.kata/kata.db (the original "each project gets its own scope" convention, same as
+// .git itself) already gives a repo full isolation by itself - "default" is still the right thread
+// default there, unchanged, so every repo this was already vendored into keeps reading its own
+// real history exactly as before (this repo's own cycles 10-14 included). Only when there's no
+// local db yet does storage fall back to ~/.kata/kata.db - one consolidated store for a
+// globally-installed `kata`, so working across dozens of repos doesn't mean dozens of scattered,
+// disconnected dbs going forward. In that shared case "default" would silently dump every
+// unrelated project into the same bucket, so the thread default becomes a project-derived identity
+// instead (see projectIdentity).
+//
+// project is always resolved the same way (projectIdentity()), regardless of which db is in play
+// and regardless of KATA_THREAD - Challenge is meant to stay one fixed north star shared by every
+// thread within a project (e.g. one thread per agent/workstream), not fork per-thread the way
+// KATA_THREAD is free to do for cycles. KATA_DB_PATH and KATA_THREAD each still override their own
+// half explicitly, regardless of which case applies; there's no override for project itself yet.
+func resolveStorage() (dbPath, project, threadID string) {
+	path := filepath.Join(".kata", "kata.db")
+	sharedDB := false
 	if p := os.Getenv("KATA_DB_PATH"); p != "" {
-		return p
+		path = p
+	} else if _, err := os.Stat(path); err != nil {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, ".kata", "kata.db")
+			sharedDB = true
+		}
 	}
-	return filepath.Join(".kata", "kata.db")
+
+	project = projectIdentity()
+	thread := "default"
+	if v := os.Getenv("KATA_THREAD"); v != "" {
+		thread = v
+	} else if sharedDB {
+		thread = project
+	}
+	return path, project, thread
 }
 
-// thread defaults to "default" - most projects only ever want one kata thread at a time, and
-// requiring an identity arg on every call would be pure friction for that common case. The db
-// file itself is already a project's own scope (same convention as .git), so this is purely the
-// layer below that: KATA_THREAD overrides it for a project that wants several parallel threads
-// (e.g. one per agent/workstream) sharing the same database file.
-func thread() string {
-	if v := os.Getenv("KATA_THREAD"); v != "" {
-		return v
+// projectIdentity is the shared-db thread default: a repo's git root absolute path, so it stays
+// stable across invocations from any subdirectory, or the cwd's absolute path for anything not in
+// a git repo. Not foolproof - moving or renaming a repo changes its identity and starts a fresh
+// history - but it's a provisional, zero-configuration default; KATA_THREAD remains the escape
+// hatch for anyone who wants a stable identity across a move, or several threads within one
+// project.
+func projectIdentity() string {
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		if root := strings.TrimSpace(string(out)); root != "" {
+			return root
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
 	}
 	return "default"
 }
@@ -108,34 +144,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dbPath()), 0o755); err != nil {
+	path, project, threadID := resolveStorage()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, "kata: create db directory:", err)
 		os.Exit(1)
 	}
-	store, err := kata.Open(dbPath())
+	store, err := kata.Open(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kata: open store:", err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
-	if err := run(store, os.Args[1], os.Args[2:]); err != nil {
+	if err := run(store, project, threadID, os.Args[1], os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "kata:", err)
 		os.Exit(1)
 	}
 }
 
-func run(store *kata.Store, verb string, args []string) error {
+func run(store *kata.Store, project, thread, verb string, args []string) error {
 	ctx := context.Background()
-	thread := thread()
 
 	switch verb {
 	case "challenge":
 		return cmdText(args, "challenge", func(text string) error {
-			return store.SetChallenge(ctx, text)
+			return store.SetChallenge(ctx, project, text)
 		})
 	case "target":
-		return cmdTarget(ctx, store, thread, args)
+		return cmdTarget(ctx, store, project, thread, args)
 	case "condition":
 		return cmdText(args, "condition", func(text string) error {
 			return store.SetCurrentCondition(ctx, thread, text)
@@ -185,7 +221,7 @@ func run(store *kata.Store, verb string, args []string) error {
 		}
 		return printCycle(c)
 	case "show":
-		return cmdShow(ctx, store, thread, args)
+		return cmdShow(ctx, store, project, thread, args)
 	case "history":
 		c, err := store.LastClosed(ctx, thread)
 		if err != nil {
@@ -212,11 +248,11 @@ func run(store *kata.Store, verb string, args []string) error {
 // set, the cycle has started; there's no separate "start" action to take first. Current
 // Condition (set afterward via `condition`) starts empty, and Deadline starts at a placeholder
 // until `expectations` sets a real one.
-func cmdTarget(ctx context.Context, store *kata.Store, thread string, args []string) error {
+func cmdTarget(ctx context.Context, store *kata.Store, project, thread string, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata target <target_condition>")
 	}
-	challenge, err := store.Challenge(ctx)
+	challenge, err := store.Challenge(ctx, project)
 	if err != nil {
 		return err
 	}
@@ -376,14 +412,14 @@ func printCycle(c *kata.Cycle) error {
 // the direct answer to "what's the target/challenge/obstacles/test right now" without piping
 // through jq for it every time, which is the exact friction this exists to remove. Scoped to the
 // active cycle only (same scope as `active` itself); `log`/`history` already cover closed cycles.
-func cmdShow(ctx context.Context, store *kata.Store, thread string, args []string) error {
+func cmdShow(ctx context.Context, store *kata.Store, project, thread string, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata show <field> (challenge, target, current, obstacles, test, expectations, results, deadline)")
 	}
 	if args[0] == "challenge" {
 		// Challenge is fixed project-level config (see cmdTarget's own store.Challenge call) -
 		// it exists whether or not a cycle is active, so it shouldn't require one to check it.
-		challenge, err := store.Challenge(ctx)
+		challenge, err := store.Challenge(ctx, project)
 		if err != nil {
 			return err
 		}
@@ -518,15 +554,27 @@ the same three-step habit of checking "what does this tool do", "am I already mi
 active', 'kata history' - orient just makes it one deterministic command instead of a memorized
 ritual.
 
-Storage: a bbolt file at ./.kata/kata.db by default (override with KATA_DB_PATH) - no server to
-start or stop, each invocation opens the file, does one thing, and closes.
+Storage: a bbolt file at ./.kata/kata.db if one already exists there, otherwise ~/.kata/kata.db -
+one consolidated store shared across every project that hasn't been given its own local db
+(override either case with KATA_DB_PATH) - no server to start or stop, each invocation opens the
+file, does one thing, and closes.
 
-Scope: a single fixed thread by default (override with KATA_THREAD for several parallel threads
-sharing one database file) - the db file itself is already a project's own scope.
+Scope: a local ./.kata/kata.db is already a project's own scope, so its thread defaults to
+"default" - a single fixed thread, same as always. The shared ~/.kata/kata.db instead defaults its
+thread to the current project's git root path (or the cwd if not in a git repo), so unrelated
+projects land in separate threads automatically instead of colliding in one shared "default"
+bucket. KATA_THREAD overrides either case outright, e.g. for several parallel threads (one per
+agent/workstream) sharing a single project's scope.
+
+Project (Challenge's own scope) is always the current project's git root path (or cwd) - the same
+identity used for the shared db's thread default above, but resolved the same way regardless of
+which db is in play, and independent of KATA_THREAD: every thread within one project shares that
+project's one Challenge, rather than each thread forking its own.
 
 Fields, in the canonical form:
-  Challenge          the why. Set once with 'kata challenge <text>', persisted into the project's
-                     own db - a fixed north star, not a per-cycle variable you retype each time.
+  Challenge          the why. Set once with 'kata challenge <text>' - a fixed north star, not a
+                     per-cycle variable you retype each time. Scoped by project (see Scope below),
+                     not by thread - every thread within one project shares the same Challenge.
                      Required before 'target' will work.
   Target Condition   how the process should be operating, phrased as a checkable state - NOT
                      the same as a target (an outcome count, e.g. "sold 20"). A target condition

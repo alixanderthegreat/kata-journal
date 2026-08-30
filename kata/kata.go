@@ -181,15 +181,28 @@ type Store struct {
 // nested bucket underneath it (see threadKey).
 var cyclesBucket = []byte("cycles")
 
-// metaBucket is the top-level bbolt bucket for project-wide, unscoped settings - not a per-thread
-// concept the way cycles are (see rootChallengeKey).
+// metaBucket is the top-level bbolt bucket for settings scoped by project rather than by thread
+// (see challengeKey) - a project's Challenge doesn't change cycle to cycle or thread to thread the
+// way cycles do, so it lives one level above them, not nested under threadKey.
 var metaBucket = []byte("meta")
 
-// rootChallengeKey is metaBucket's single entry: the project's Challenge - the why - set once
-// via SetChallenge rather than re-typed (or re-worded) on every Start. A project's "why" doesn't
-// change cycle to cycle, so it lives in the db itself rather than something a caller has to
-// remember to supply every time (an env var, a CLI arg).
+// rootChallengeKey is the legacy single Challenge slot from before Challenge was scoped by
+// project - every existing db predates that change, so Challenge still falls back to reading this
+// key when a project's own challengeKey entry is unset, meaning an existing db's Challenge (e.g.
+// this repo's own "Play.") keeps working with no migration step. SetChallenge never writes here
+// again; only challengeKey is written going forward.
 var rootChallengeKey = []byte("root_challenge")
+
+// challengeKeyPrefix namespaces per-project Challenge entries within metaBucket - see challengeKey.
+var challengeKeyPrefix = []byte("challenge:")
+
+// challengeKey derives a project's own Challenge entry - project is the same repo/cwd identity
+// used elsewhere (see the CLI's projectIdentity()), kept independent of thread so several threads
+// within one project (e.g. one per agent) share the same Challenge rather than each getting their
+// own fork of it.
+func challengeKey(project string) []byte {
+	return append(append([]byte{}, challengeKeyPrefix...), []byte(project)...)
+}
 
 // threadKey derives a nested bucket name from a thread - the db file itself is already a
 // project's own scope (see Open), so this is purely the layer below that: several parallel
@@ -235,27 +248,36 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// SetChallenge persists the project's Challenge into metaBucket - a one-time (or
-// deliberately-changed) project-wide setting, not a per-cycle argument. Overwrites whatever was
-// there before; there's exactly one root Challenge per db file.
-func (s *Store) SetChallenge(ctx context.Context, challenge string) error {
+// SetChallenge persists one project's Challenge into metaBucket, keyed by project (see
+// challengeKey) - a one-time (or deliberately-changed) project-wide setting, not a per-cycle or
+// per-thread argument. Overwrites whatever was there before for that project; a different
+// project's Challenge, in the same db file or otherwise, is untouched.
+func (s *Store) SetChallenge(ctx context.Context, project, challenge string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(metaBucket).Put(rootChallengeKey, []byte(challenge))
+		return tx.Bucket(metaBucket).Put(challengeKey(project), []byte(challenge))
 	})
 }
 
-// Challenge returns the project's Challenge as set by SetChallenge, or "" if it's never been
-// set.
-func (s *Store) Challenge(ctx context.Context) (string, error) {
+// Challenge returns one project's Challenge as set by SetChallenge, or "" if it's never been set
+// for that project. Falls back to the legacy rootChallengeKey when the project's own entry is
+// unset - see rootChallengeKey's own doc comment for why: every db that predates per-project
+// Challenge scoping already has its one Challenge sitting there, and this makes it keep resolving
+// with no migration step required.
+func (s *Store) Challenge(ctx context.Context, project string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var challenge string
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		challenge = string(tx.Bucket(metaBucket).Get(rootChallengeKey))
+		bucket := tx.Bucket(metaBucket)
+		if v := bucket.Get(challengeKey(project)); len(v) > 0 {
+			challenge = string(v)
+			return nil
+		}
+		challenge = string(bucket.Get(rootChallengeKey))
 		return nil
 	})
 	if err != nil {

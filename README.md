@@ -136,6 +136,7 @@ than duplicated here. Short version:
 | `close <results>` | Close the cycle - requires every Test item complete |
 | `close-expired [results]` | Close honestly once the deadline has passed, complete or not |
 | `active` | Show the current open cycle |
+| `show <field>` | Print one field of the active cycle as plain text (`challenge` works with no active cycle; every other field needs one) |
 | `history` | Show the most recently closed cycle |
 | `orient` | Re-orientation as one command: usage + active + history, in order; never errors on an empty active/history state |
 | `log [keyword]` | List every closed cycle, newest first; `keyword` filters by substring across Challenge/Target/Current/Expectations/Results |
@@ -143,13 +144,22 @@ than duplicated here. Short version:
 ## Storage and scope
 
 Cycles persist in a local [bbolt](https://github.com/etcd-io/bbolt) file - pure Go, no cgo, no
-server process. Defaults to `./.kata/kata.db`, the same "each project gets its own store"
-convention as `.git` itself; override with `KATA_DB_PATH`.
+server process. Defaults to `./.kata/kata.db` if one already exists there (the original "each
+project gets its own store" convention, same as `.git`), otherwise falls back to `~/.kata/kata.db`
+- one consolidated store shared by every project that hasn't been given its own local db.
+`KATA_DB_PATH` overrides either case.
 
-The db file is already a project's own scope. Underneath that, cycles are further scoped by a
-single *thread* - most projects only ever need the default one, but `KATA_THREAD` lets several
-parallel lines of work (e.g. one per agent or workstream) share the same database file without
-stepping on each other's active cycle.
+A local `./.kata/kata.db` is already a project's own scope, so it keeps a single fixed *thread*,
+`"default"`. The shared `~/.kata/kata.db` instead defaults each project's thread to its git root
+path (or the cwd, if not in a git repo), so unrelated projects land in separate threads
+automatically instead of colliding in one bucket. `KATA_THREAD` overrides either case outright -
+e.g. for several parallel lines of work (one per agent or workstream) within a single project's
+own scope.
+
+Challenge is scoped by *project* (the same git-root/cwd identity), not by thread, and always
+resolved the same way regardless of which db is in play - every thread within one project shares
+that project's one Challenge, so `KATA_THREAD` can fork cycles into parallel lines of work without
+ever forking the north star they're all working toward.
 
 ## Design notes
 
@@ -159,9 +169,15 @@ stepping on each other's active cycle.
   didn't happen; it never blocks or errors just because the Test wasn't finished in time.
 - **Challenge lives in the database, not an environment variable.** It's a project-wide constant
   (`kata challenge <text>`), so it survives across shells and machines instead of needing to be
-  re-exported every session.
+  re-exported every session. Scoped by project, independent of thread, so it can't accidentally
+  fork per agent/workstream the way `KATA_THREAD` lets cycles do.
 - **No semantic search, on purpose.** `kata log` filters by plain substring, not embeddings - a
   personal-scale journal doesn't have the volume to justify it, and it's one less dependency.
 - **Edits are audited, not silent.** `edit-obstacle`/`edit-test` stamp `edited_at` rather than
   quietly overwriting text, and `edit-test` refuses once an item is complete - its `results` is
   the record of what actually happened, not something a later edit should be able to rewrite.
+- **Pass `-` for any text argument to read it from stdin instead.** A bare `$` or backtick in a
+  double-quoted shell argument can get expanded before this program ever sees it (e.g.
+  `kata condition "spent $32.10 on coffee"` silently records `spent 2.10 on coffee`). Piping the
+  text in via a quoted heredoc (`kata condition - <<'EOF' ... EOF`) is immune to that regardless of
+  content.
