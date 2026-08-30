@@ -70,7 +70,17 @@ timeframe - not before.
   use this deliberately: a later `complete` call is how you add a correction or a follow-up log
   entry without losing what was there before.
 - A text argument containing a bare `$` or a backtick can get shell-expanded before the CLI ever
-  sees it. Quote carefully - the damage happens at the shell's parse time, not the program's.
+  sees it - e.g. `kata condition "spent $32.10 on coffee"` silently records "spent 2.10 on coffee"
+  (bash reads `$3` as an empty positional param). Quote carefully, or better: pass `-` in place of
+  any `<text>`/`<results>`/`<target_condition>` argument to read it from stdin instead, and supply
+  it via a quoted heredoc delimiter - the one form immune to expansion regardless of content:
+  ```
+  kata condition - <<'EOF'
+  spent $32.10 on coffee
+  EOF
+  ```
+  Prefer this stdin form over an inline double-quoted arg for any text that isn't known in advance
+  to be free of `$`/backtick/other shell metacharacters - that covers most bot/agent-generated text.
 - `kata show <field>` prints one field of the active cycle as plain text - no jq needed for the
   common "what's the target/obstacles/test right now" check. `show test` prints each item's
   `ResultsHistory` indented underneath it, not just the text and done/not-done mark - it missed

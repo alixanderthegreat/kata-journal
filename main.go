@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -80,6 +81,22 @@ func thread() string {
 	return "default"
 }
 
+// readText resolves a text argument, treating a bare "-" as "read the rest from stdin" instead of
+// a literal one-character string - the safe path for text a shell can't be trusted to pass through
+// unmangled (a bare $ or backtick in a double-quoted arg gets expanded before this program ever
+// sees it; see the CAUTION in usage()). A single trailing newline is trimmed since it's an artifact
+// of how the text was piped in (e.g. a heredoc), not part of the intended content.
+func readText(arg string) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	b, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	return strings.TrimSuffix(string(b), "\n"), nil
+}
+
 func main() {
 	// Before the arg check, not after - a bare `kata` with no args is itself one of the
 	// invocations the user asked this to cover ("kata or any kata <command>"), and it currently
@@ -144,7 +161,11 @@ func run(store *kata.Store, verb string, args []string) error {
 	case "close-expired":
 		results := ""
 		if len(args) > 0 {
-			results = args[0]
+			r, err := readText(args[0])
+			if err != nil {
+				return err
+			}
+			results = r
 		}
 		c, err := store.CloseIfDeadlinePassed(ctx, thread, results)
 		if err != nil {
@@ -202,8 +223,12 @@ func cmdTarget(ctx context.Context, store *kata.Store, thread string, args []str
 	if challenge == "" {
 		return fmt.Errorf("no Challenge set - Challenge is fixed project config, not a per-cycle argument; set it once with `kata challenge \"...\"` and re-run")
 	}
+	targetCondition, err := readText(args[0])
+	if err != nil {
+		return err
+	}
 	deadline := time.Now().Add(15 * time.Minute) // placeholder default until `expectations` sets a real one
-	c, err := store.Start(ctx, thread, "directed", challenge, args[0], "", deadline)
+	c, err := store.Start(ctx, thread, "directed", challenge, targetCondition, "", deadline)
 	if err != nil {
 		return err
 	}
@@ -214,7 +239,11 @@ func cmdText(args []string, verb string, fn func(string) error) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata %s <text>", verb)
 	}
-	if err := fn(args[0]); err != nil {
+	text, err := readText(args[0])
+	if err != nil {
+		return err
+	}
+	if err := fn(text); err != nil {
 		return err
 	}
 	fmt.Println("ok")
@@ -235,7 +264,11 @@ func cmdEditObstacle(ctx context.Context, store *kata.Store, thread string, args
 	if err != nil {
 		return fmt.Errorf("index must be an integer: %w", err)
 	}
-	if err := store.EditObstacle(ctx, thread, index, args[1]); err != nil {
+	text, err := readText(args[1])
+	if err != nil {
+		return err
+	}
+	if err := store.EditObstacle(ctx, thread, index, text); err != nil {
 		return err
 	}
 	fmt.Println("ok")
@@ -252,7 +285,11 @@ func cmdEditTestItem(ctx context.Context, store *kata.Store, thread string, args
 	if err != nil {
 		return fmt.Errorf("item_id must be an integer: %w", err)
 	}
-	if err := store.EditTestItem(ctx, thread, id, args[1]); err != nil {
+	text, err := readText(args[1])
+	if err != nil {
+		return err
+	}
+	if err := store.EditTestItem(ctx, thread, id, text); err != nil {
 		return err
 	}
 	fmt.Println("ok")
@@ -263,7 +300,11 @@ func cmdExpectations(ctx context.Context, store *kata.Store, thread string, args
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata expectations <text> [deadline_minutes]")
 	}
-	if err := store.SetExpectations(ctx, thread, args[0]); err != nil {
+	text, err := readText(args[0])
+	if err != nil {
+		return err
+	}
+	if err := store.SetExpectations(ctx, thread, text); err != nil {
 		return err
 	}
 	if len(args) > 1 {
@@ -289,7 +330,11 @@ func cmdComplete(ctx context.Context, store *kata.Store, thread string, args []s
 	}
 	results := ""
 	if len(args) > 1 {
-		results = args[1]
+		r, err := readText(args[1])
+		if err != nil {
+			return err
+		}
+		results = r
 	}
 	if err := store.CompleteItem(ctx, thread, id, results); err != nil {
 		return err
@@ -302,7 +347,11 @@ func cmdClose(ctx context.Context, store *kata.Store, thread string, args []stri
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata close <results>")
 	}
-	c, err := store.CloseCycle(ctx, thread, args[0])
+	text, err := readText(args[0])
+	if err != nil {
+		return err
+	}
+	c, err := store.CloseCycle(ctx, thread, text)
 	if err != nil {
 		if strings.Contains(err.Error(), "incomplete test items") {
 			fmt.Fprintln(os.Stderr, "hint: close requires every Test item complete - finish the "+
@@ -331,6 +380,16 @@ func cmdShow(ctx context.Context, store *kata.Store, thread string, args []strin
 	if len(args) < 1 {
 		return fmt.Errorf("usage: kata show <field> (challenge, target, current, obstacles, test, expectations, results, deadline)")
 	}
+	if args[0] == "challenge" {
+		// Challenge is fixed project-level config (see cmdTarget's own store.Challenge call) -
+		// it exists whether or not a cycle is active, so it shouldn't require one to check it.
+		challenge, err := store.Challenge(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(challenge)
+		return nil
+	}
 	c, err := store.Active(ctx, thread)
 	if err != nil {
 		return err
@@ -339,8 +398,6 @@ func cmdShow(ctx context.Context, store *kata.Store, thread string, args []strin
 		return fmt.Errorf("no active cycle for thread %q", thread)
 	}
 	switch args[0] {
-	case "challenge":
-		fmt.Println(c.Challenge)
 	case "target", "target_condition":
 		fmt.Println(c.TargetCondition)
 	case "current", "condition", "current_condition":
@@ -542,6 +599,15 @@ Verbs:
 Caution: a text argument containing a bare $ or a backtick can get expanded or executed by your
 own shell before this program ever sees it (e.g. inside a double-quoted bash argument) - the
 damage happens at your shell's parse time, this program has no way to catch it after the fact.
-Quote carefully, or the permanent record ends up holding something other than what you meant.
+Quote carefully, or use the '-' stdin form below, or the permanent record ends up holding
+something other than what you meant.
+
+Stdin: pass '-' in place of any <text>/<results>/<target_condition> argument to read it from
+stdin instead - the one input path immune to shell expansion regardless of content, since a
+quoted heredoc delimiter (<<'EOF') never expands $ or backticks no matter what's inside it:
+  kata condition - <<'EOF'
+  spent $32.10 on coffee
+  EOF
+A single trailing newline is trimmed; everything else is taken verbatim.
 `)
 }
