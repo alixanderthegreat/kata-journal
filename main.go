@@ -233,6 +233,16 @@ func run(store *kata.Store, project, thread, verb string, args []string) error {
 		return printCycle(c)
 	case "log":
 		return cmdLog(ctx, store, thread, args)
+	case "migrate":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: kata migrate <old-bbolt-path>")
+		}
+		challenges, cycles, err := store.MigrateFromBbolt(args[0])
+		if err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+		fmt.Printf("migrated %d challenge(s), %d cycle(s) from %s\n", challenges, cycles, args[0])
+		return nil
 	case "orient":
 		return cmdOrient(ctx, store, thread)
 	case "help", "-h", "--help":
@@ -643,6 +653,10 @@ Verbs:
                                  keyword filters case-insensitively across Challenge, Target,
                                  Current, Expectations, and Results - a plain substring match,
                                  not semantic search
+  migrate <old-bbolt-path>       migrate every Challenge and Cycle out of an OLD bbolt-backed
+                                 kata-journal database into this Store - explicit and visible,
+                                 not automatic; read-only against the source, refuses to
+                                 overwrite any project/thread+id that already exists here
 
 Caution: a text argument containing a bare $ or a backtick can get expanded or executed by your
 own shell before this program ever sees it (e.g. inside a double-quoted bash argument) - the

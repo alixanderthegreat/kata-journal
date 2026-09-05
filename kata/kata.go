@@ -33,6 +33,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -239,6 +240,91 @@ func Open(dbPath string) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// MigrateFromBbolt migrates every Challenge and Cycle out of an OLD bbolt-backed kata-journal
+// database (bboltPath) into this Store, using gordian-db's WalkBbolt primitive against the
+// pre-gordian-db bucket layout: a top-level "meta" bucket (keys "challenge:<project>", plus the
+// legacy single "root_challenge" slot from before per-project scoping existed) and a top-level
+// "cycles" bucket (one nested bucket per thread, entries keyed by an 8-byte big-endian id -
+// bbolt's own layout, not this Store's - see cycleKey/challengeKey for what a gordian-db-backed
+// Store actually stores now).
+//
+// root_challenge is migrated under the empty-string project key - preserving it losslessly
+// without inventing a new fallback-lookup behavior this Store doesn't otherwise have; nothing
+// currently resolves the empty-string project in real use, so it sits there as an inert,
+// recoverable historical artifact rather than being silently dropped.
+//
+// Read-only against the source throughout (WalkBbolt itself opens bboltPath with bbolt's own
+// ReadOnly option - migration can never mutate or corrupt the file being migrated). Refuses to
+// overwrite: before writing any entry, checks whether the destination key already exists and
+// returns an error naming exactly what collided rather than silently clobbering real data -
+// this is meant to migrate INTO an empty or non-conflicting Store, not merge on top of live data
+// sharing the same project/thread+id identity.
+//
+// Returns how many challenges and cycles were actually migrated before any error - a partial
+// migration is reported as a real error (and a real partial count), never silently completed
+// short or swallowed.
+func (s *Store) MigrateFromBbolt(bboltPath string) (challenges, cycles int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	err = gordian.WalkBbolt(bboltPath, func(bucketPath [][]byte, key, value []byte) error {
+		if len(bucketPath) == 0 {
+			return fmt.Errorf("unexpected empty bucket path")
+		}
+		switch string(bucketPath[0]) {
+		case "meta":
+			if len(bucketPath) != 1 {
+				return fmt.Errorf("unexpected meta bucket depth %d", len(bucketPath))
+			}
+			k := string(key)
+			var project string
+			switch {
+			case k == "root_challenge":
+				project = ""
+			case strings.HasPrefix(k, "challenge:"):
+				project = strings.TrimPrefix(k, "challenge:")
+			default:
+				return fmt.Errorf("unrecognized meta key %q - refusing to silently drop it", k)
+			}
+			dk := challengeKey(project)
+			if _, ok, getErr := s.db.Get(dk); getErr != nil {
+				return getErr
+			} else if ok {
+				return fmt.Errorf("challenge for project %q already exists in destination - refusing to overwrite", project)
+			}
+			if putErr := s.db.Put(dk, append([]byte(nil), value...)); putErr != nil {
+				return putErr
+			}
+			challenges++
+
+		case "cycles":
+			if len(bucketPath) != 2 {
+				return fmt.Errorf("unexpected cycles bucket depth %d (path %q) - schema assumption violated", len(bucketPath), bucketPath)
+			}
+			thread := string(bucketPath[1])
+			if len(key) != 8 {
+				return fmt.Errorf("unexpected cycle key length %d for thread %q - expected 8-byte id", len(key), thread)
+			}
+			id := int64(binary.BigEndian.Uint64(key))
+			dk := cycleKey(thread, id)
+			if _, ok, getErr := s.db.Get(dk); getErr != nil {
+				return getErr
+			} else if ok {
+				return fmt.Errorf("cycle %d for thread %q already exists in destination - refusing to overwrite", id, thread)
+			}
+			if putErr := s.db.Put(dk, append([]byte(nil), value...)); putErr != nil {
+				return putErr
+			}
+			cycles++
+
+		default:
+			return fmt.Errorf("unrecognized top-level bucket %q - refusing to silently drop it", string(bucketPath[0]))
+		}
+		return nil
+	})
+	return challenges, cycles, err
 }
 
 // SetChallenge persists one project's Challenge, keyed by project (see challengeKey) - a
