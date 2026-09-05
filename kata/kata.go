@@ -23,8 +23,9 @@
 // Cycles are scoped by a thread - a plain string key. One project's db file (see Open) is
 // already its own scope by virtue of being its own file, so thread exists for the layer below
 // that: several parallel lines of work sharing one db file. Most projects only ever need one,
-// the CLI's own default. Own bbolt file, pure Go with no cgo - nothing here needs SQL or
-// embeddings, just "what's the active cycle for this thread."
+// the CLI's own default. Backed by gordian-db (github.com/alixanderthegreat/gordian-db), a
+// pure-Go, pebble-based key/value store - swapped in from bbolt in kata cycle 12/13 of
+// gordian-db's own project. See Store's doc comment for what changed and why.
 package kata
 
 import (
@@ -35,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	"go.etcd.io/bbolt"
+	gordian "github.com/alixanderthegreat/gordian-db"
 )
 
 // TestItem is one item in a cycle's Test - one of the moves constructed to advance Current
@@ -157,19 +158,28 @@ func (c *Cycle) IsComplete() bool {
 	return true
 }
 
-// Store persists cycles in their own bbolt file - a single embedded, pure-Go key/value store,
-// no SQL or embeddings needed for "what's the active cycle for this thread."
+// Store persists cycles in a gordian-db store - a single embedded, pure-Go key/value store (see
+// github.com/alixanderthegreat/gordian-db), no SQL or embeddings needed for "what's the active
+// cycle for this thread."
 //
-// Layout: one top-level bucket (cyclesBucket), holding one nested bucket per thread (see
-// threadKey), holding one entry per cycle keyed by its id (see idKey, an 8-byte big-endian
-// encoding so bbolt's lexicographic key order matches numeric id order). Kind, Thread, and every
-// other Cycle field live inside the JSON value, same as the id itself - the key is purely for
-// ordering and lookup, decode always trusts its own arguments over whatever the JSON payload
-// claims (see decode's own doc comment). A second top-level bucket (metaBucket) holds
-// project-wide settings that aren't scoped to any thread - currently just the root Challenge
-// (see SetChallenge).
+// Layout: gordian-db's Store has one flat keyspace with prefix Scan, not bbolt's nested
+// buckets - this package's own key encoding (see cycleKey/cyclePrefix/challengeKey) gives
+// thread and category isolation that bbolt's bucket boundaries used to provide for free. A tag
+// byte separates key categories (Challenge vs Cycle) so they can never collide with each other,
+// and within a category a 2-byte big-endian LENGTH PREFIX precedes each variable-length string
+// (project or thread name) before its own bytes - this is what makes the encoding
+// collision-safe: two different strings can never produce ambiguous overlapping key ranges the
+// way plain concatenation could (e.g. thread "a" vs thread "ab"). Every Cycle field (including
+// its own id) lives inside the JSON value, same as before - the key is purely for ordering and
+// lookup, decode always trusts its own arguments over whatever the JSON payload claims (see
+// decode's own doc comment).
+//
+// This Store starts fresh - it has no legacy bbolt-format data to migrate or self-heal from
+// (the previous bbolt-backed Store's legacy-compatibility paths - a root Challenge fallback,
+// and self-healing for corrupted/pre-existing rows - had no equivalent need here and were not
+// ported; see kata-journal's kata cycle 13 for the migration this replaced).
 type Store struct {
-	db *bbolt.DB
+	db *gordian.Store
 
 	// mu serializes every read-modify-write against this store. A Cycle read followed by a
 	// write is not atomic on its own, so any caller sharing one Store across goroutines needs
@@ -177,70 +187,53 @@ type Store struct {
 	mu sync.Mutex
 }
 
-// cyclesBucket is the top-level bbolt bucket holding every thread's cycles, each in its own
-// nested bucket underneath it (see threadKey).
-var cyclesBucket = []byte("cycles")
+// Key encoding - see Store's own doc comment for why a tag byte + length prefix is what makes
+// this collision-safe, not plain concatenation.
+const (
+	tagChallenge byte = 0x01
+	tagCycle     byte = 0x02
+)
 
-// metaBucket is the top-level bbolt bucket for settings scoped by project rather than by thread
-// (see challengeKey) - a project's Challenge doesn't change cycle to cycle or thread to thread the
-// way cycles do, so it lives one level above them, not nested under threadKey.
-var metaBucket = []byte("meta")
-
-// rootChallengeKey is the legacy single Challenge slot from before Challenge was scoped by
-// project - every existing db predates that change, so Challenge still falls back to reading this
-// key when a project's own challengeKey entry is unset, meaning an existing db's Challenge (e.g.
-// this repo's own "Play.") keeps working with no migration step. SetChallenge never writes here
-// again; only challengeKey is written going forward.
-var rootChallengeKey = []byte("root_challenge")
-
-// challengeKeyPrefix namespaces per-project Challenge entries within metaBucket - see challengeKey.
-var challengeKeyPrefix = []byte("challenge:")
+func lengthPrefixed(buf []byte, s string) []byte {
+	buf = binary.BigEndian.AppendUint16(buf, uint16(len(s)))
+	return append(buf, s...)
+}
 
 // challengeKey derives a project's own Challenge entry - project is the same repo/cwd identity
 // used elsewhere (see the CLI's projectIdentity()), kept independent of thread so several threads
 // within one project (e.g. one per agent) share the same Challenge rather than each getting their
 // own fork of it.
 func challengeKey(project string) []byte {
-	return append(append([]byte{}, challengeKeyPrefix...), []byte(project)...)
+	return lengthPrefixed([]byte{tagChallenge}, project)
 }
 
-// threadKey derives a nested bucket name from a thread - the db file itself is already a
-// project's own scope (see Open), so this is purely the layer below that: several parallel
+// cyclePrefix is the Scan prefix covering every cycle for thread - the db file itself is already
+// a project's own scope (see Open), so this is purely the layer below that: several parallel
 // lines of work sharing one file.
-func threadKey(thread string) []byte {
-	return []byte(thread)
+func cyclePrefix(thread string) []byte {
+	return lengthPrefixed([]byte{tagCycle}, thread)
 }
 
-// idKey encodes a cycle id as 8 bytes, big-endian - bbolt keys sort lexicographically as raw
-// bytes, so a fixed-width big-endian encoding is what makes key order match numeric id order
-// (a decimal string encoding would not: "10" sorts before "9").
-func idKey(id int64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(id))
-	return b
+// cycleKey encodes one cycle's full key: cyclePrefix(thread) followed by its id as 8 bytes,
+// big-endian - Scan's key order is raw byte order, so a fixed-width big-endian encoding is what
+// makes key order match numeric id order (a decimal string encoding would not: "10" sorts before
+// "9").
+func cycleKey(thread string, id int64) []byte {
+	key := cyclePrefix(thread)
+	idBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(idBuf, uint64(id))
+	return append(key, idBuf...)
 }
 
-func idFromKey(k []byte) int64 {
-	return int64(binary.BigEndian.Uint64(k))
+func idFromCycleKey(key []byte) int64 {
+	return int64(binary.BigEndian.Uint64(key[len(key)-8:]))
 }
 
 func Open(dbPath string) (*Store, error) {
-	db, err := bbolt.Open(dbPath, 0o600, nil)
+	db, err := gordian.Open(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("open bbolt: %w", err)
+		return nil, fmt.Errorf("open gordian-db store: %w", err)
 	}
-
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		if _, err := tx.CreateBucketIfNotExists(cyclesBucket); err != nil {
-			return err
-		}
-		_, err := tx.CreateBucketIfNotExists(metaBucket)
-		return err
-	}); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("create top-level buckets: %w", err)
-	}
-
 	return &Store{db: db}, nil
 }
 
@@ -248,62 +241,57 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// SetChallenge persists one project's Challenge into metaBucket, keyed by project (see
-// challengeKey) - a one-time (or deliberately-changed) project-wide setting, not a per-cycle or
-// per-thread argument. Overwrites whatever was there before for that project; a different
-// project's Challenge, in the same db file or otherwise, is untouched.
+// SetChallenge persists one project's Challenge, keyed by project (see challengeKey) - a
+// one-time (or deliberately-changed) project-wide setting, not a per-cycle or per-thread
+// argument. Overwrites whatever was there before for that project; a different project's
+// Challenge, in the same db file or otherwise, is untouched.
 func (s *Store) SetChallenge(ctx context.Context, project, challenge string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(metaBucket).Put(challengeKey(project), []byte(challenge))
-	})
+	return s.db.Put(challengeKey(project), []byte(challenge))
 }
 
 // Challenge returns one project's Challenge as set by SetChallenge, or "" if it's never been set
-// for that project. Falls back to the legacy rootChallengeKey when the project's own entry is
-// unset - see rootChallengeKey's own doc comment for why: every db that predates per-project
-// Challenge scoping already has its one Challenge sitting there, and this makes it keep resolving
-// with no migration step required.
+// for that project.
 func (s *Store) Challenge(ctx context.Context, project string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var challenge string
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket(metaBucket)
-		if v := bucket.Get(challengeKey(project)); len(v) > 0 {
-			challenge = string(v)
-			return nil
-		}
-		challenge = string(bucket.Get(rootChallengeKey))
-		return nil
-	})
+	v, ok, err := s.db.Get(challengeKey(project))
 	if err != nil {
 		return "", fmt.Errorf("query challenge: %w", err)
 	}
-	return challenge, nil
+	if !ok {
+		return "", nil
+	}
+	return string(v), nil
 }
 
-// threadBucket returns the nested bucket for thread, or nil if that thread has never had a
-// cycle started - caller decides whether that's an error or just "nothing here yet."
-func threadBucket(tx *bbolt.Tx, thread string) *bbolt.Bucket {
-	cycles := tx.Bucket(cyclesBucket)
-	if cycles == nil {
-		return nil
+// scanCyclesLocked returns every cycle for thread, in ascending id order (gordian-db's Scan
+// order) - assumes the caller already holds mu. The bbolt-backed Store did this via a cursor
+// walking a nested bucket; gordian-db's flat keyspace + prefix Scan makes a full-range scan the
+// natural equivalent, consistent with this package's own original design philosophy (see
+// PruneAutonomous's and ClosedCycles's original doc comments: "never a lot of rows for a
+// single-operator tool... simpler than maintaining a separate index").
+func (s *Store) scanCyclesLocked(thread string) ([]*Cycle, error) {
+	var cycles []*Cycle
+	var decodeErr error
+	if err := s.db.Scan(cyclePrefix(thread), func(key, value []byte) bool {
+		c, err := decode(idFromCycleKey(key), thread, value)
+		if err != nil {
+			decodeErr = err
+			return false
+		}
+		cycles = append(cycles, c)
+		return true
+	}); err != nil {
+		return nil, err
 	}
-	return cycles.Bucket(threadKey(thread))
-}
-
-// threadBucketCreate is threadBucket but creates the nested bucket on first use - only ever
-// called from inside an Update transaction (bbolt buckets can't be created from a View).
-func threadBucketCreate(tx *bbolt.Tx, thread string) (*bbolt.Bucket, error) {
-	cycles := tx.Bucket(cyclesBucket)
-	if cycles == nil {
-		return nil, fmt.Errorf("cycles bucket missing - Store not opened via Open")
+	if decodeErr != nil {
+		return nil, decodeErr
 	}
-	return cycles.CreateBucketIfNotExists(threadKey(thread))
+	return cycles, nil
 }
 
 // Active returns the current open cycle (ClosedAt == nil) for thread, or nil if there isn't one
@@ -320,99 +308,56 @@ func (s *Store) Active(ctx context.Context, thread string) (*Cycle, error) {
 //
 // Start refuses to open a new cycle while one is already active, so within a thread's history at
 // most one cycle is ever open at a time, and it's always the newest (highest id) one - the
-// moment the newest entry turns out to already be closed, there is no active cycle at all, so
-// this can stop at the first entry instead of scanning the whole bucket.
+// moment the newest entry turns out to already be closed, there is no active cycle at all.
 func (s *Store) activeLocked(ctx context.Context, thread string) (*Cycle, error) {
-	var result *Cycle
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		bucket := threadBucket(tx, thread)
-		if bucket == nil {
-			return nil
-		}
-		k, v := bucket.Cursor().Last()
-		if k == nil {
-			return nil
-		}
-		c, err := decode(idFromKey(k), thread, v)
-		if err != nil {
-			return err
-		}
-		if c.ClosedAt == nil {
-			result = c
-		}
-		return nil
-	})
+	cycles, err := s.scanCyclesLocked(thread)
 	if err != nil {
 		return nil, fmt.Errorf("query active cycle: %w", err)
 	}
-	return result, nil
+	if len(cycles) == 0 {
+		return nil, nil
+	}
+	last := cycles[len(cycles)-1]
+	if last.ClosedAt == nil {
+		return last, nil
+	}
+	return nil, nil
 }
 
 // LastClosed returns the most recently closed cycle for thread, or nil if none has ever closed -
 // used to seed a new cycle's Challenge/Target from the previous one's retrospective ("beginning
 // next kata now").
-//
-// Walks backward from the newest id: since Start refuses to open a new cycle while one is
-// active, cycles within a thread start and close in strict id order, so the first closed cycle
-// found walking backward (skipping only a possible still-open newest one) is the most recently
-// closed - no need to compare ClosedAt timestamps across the whole bucket.
 func (s *Store) LastClosed(ctx context.Context, thread string) (*Cycle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var result *Cycle
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		bucket := threadBucket(tx, thread)
-		if bucket == nil {
-			return nil
-		}
-		cur := bucket.Cursor()
-		for k, v := cur.Last(); k != nil; k, v = cur.Prev() {
-			c, err := decode(idFromKey(k), thread, v)
-			if err != nil {
-				return err
-			}
-			if c.ClosedAt != nil {
-				result = c
-				return nil
-			}
-		}
-		return nil
-	})
+	cycles, err := s.scanCyclesLocked(thread)
 	if err != nil {
 		return nil, fmt.Errorf("query last closed cycle: %w", err)
 	}
-	return result, nil
+	for i := len(cycles) - 1; i >= 0; i-- {
+		if cycles[i].ClosedAt != nil {
+			return cycles[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // ClosedCycles returns every closed cycle for thread, newest first - the full history behind
-// LastClosed's single most-recent one, for browsing back further than one cycle. Never a lot of
-// rows for a single-operator tool, so a full bucket walk (same pattern as PruneAutonomous) is
-// simpler than maintaining a separate index.
+// LastClosed's single most-recent one, for browsing back further than one cycle.
 func (s *Store) ClosedCycles(ctx context.Context, thread string) ([]*Cycle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var results []*Cycle
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		bucket := threadBucket(tx, thread)
-		if bucket == nil {
-			return nil
-		}
-		cur := bucket.Cursor()
-		for k, v := cur.Last(); k != nil; k, v = cur.Prev() {
-			c, err := decode(idFromKey(k), thread, v)
-			if err != nil {
-				return err
-			}
-			if c.ClosedAt != nil {
-				results = append(results, c)
-			}
-		}
-		return nil
-	})
+	cycles, err := s.scanCyclesLocked(thread)
 	if err != nil {
 		return nil, fmt.Errorf("query closed cycles: %w", err)
+	}
+	var results []*Cycle
+	for i := len(cycles) - 1; i >= 0; i-- {
+		if cycles[i].ClosedAt != nil {
+			results = append(results, cycles[i])
+		}
 	}
 	return results, nil
 }
@@ -422,46 +367,29 @@ func (s *Store) ClosedCycles(ctx context.Context, thread string) ([]*Cycle, erro
 // Directed cycles and the currently active one (ClosedAt == nil) are never touched, by
 // construction: only entries that decode with Kind == "autonomous" AND a non-nil ClosedAt are
 // ever candidates.
-//
-// A plain delete, not an archive, is the deliberate call: whatever mattered from one autonomous
-// cycle is expected to already be carried forward into the next one's own Current Condition (via
-// LastClosed's Results), so nothing this removes is otherwise-unrecoverable information - it's
-// ambient noise that already compounded forward before being pruned.
 func (s *Store) PruneAutonomous(ctx context.Context, thread string, keep int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.db.Update(func(tx *bbolt.Tx) error {
-		bucket := threadBucket(tx, thread)
-		if bucket == nil {
-			return nil
-		}
+	cycles, err := s.scanCyclesLocked(thread)
+	if err != nil {
+		return fmt.Errorf("query cycles for prune: %w", err)
+	}
 
-		var toDelete [][]byte
-		seenAutonomous := 0
-		cur := bucket.Cursor()
-		for k, v := cur.Last(); k != nil; k, v = cur.Prev() {
-			c, err := decode(idFromKey(k), thread, v)
-			if err != nil {
-				return fmt.Errorf("decode cycle %d: %w", idFromKey(k), err)
-			}
-			if c.ClosedAt == nil || c.Kind != "autonomous" {
-				continue
-			}
-			seenAutonomous++
-			if seenAutonomous > keep {
-				// Cursor-returned keys are only valid until the next cursor call or a bucket
-				// mutation - copy before collecting for deletion after the scan completes.
-				toDelete = append(toDelete, append([]byte(nil), k...))
+	seenAutonomous := 0
+	for i := len(cycles) - 1; i >= 0; i-- {
+		c := cycles[i]
+		if c.ClosedAt == nil || c.Kind != "autonomous" {
+			continue
+		}
+		seenAutonomous++
+		if seenAutonomous > keep {
+			if err := s.db.Delete(cycleKey(thread, c.ID)); err != nil {
+				return fmt.Errorf("delete pruned cycle %d: %w", c.ID, err)
 			}
 		}
-		for _, k := range toDelete {
-			if err := bucket.Delete(k); err != nil {
-				return fmt.Errorf("delete pruned cycle %d: %w", idFromKey(k), err)
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // Start opens a new cycle for thread. Errors if one is already active - close it first. That's
@@ -496,48 +424,32 @@ func (s *Store) Start(ctx context.Context, thread, kind, challenge, targetCondit
 }
 
 func (s *Store) insert(ctx context.Context, c *Cycle) error {
-	return s.db.Update(func(tx *bbolt.Tx) error {
-		bucket, err := threadBucketCreate(tx, c.Thread)
-		if err != nil {
-			return fmt.Errorf("open thread bucket: %w", err)
-		}
-		k, _ := bucket.Cursor().Last()
-		id := int64(0)
-		if k != nil {
-			id = idFromKey(k) + 1
-		}
-		c.ID = id
-		data, err := encode(c)
-		if err != nil {
-			return err
-		}
-		return bucket.Put(idKey(id), data)
-	})
+	cycles, err := s.scanCyclesLocked(c.Thread)
+	if err != nil {
+		return err
+	}
+	id := int64(0)
+	if len(cycles) > 0 {
+		id = cycles[len(cycles)-1].ID + 1
+	}
+	c.ID = id
+	data, err := encode(c)
+	if err != nil {
+		return err
+	}
+	return s.db.Put(cycleKey(c.Thread, id), data)
 }
 
 // update scopes its write by thread+id, not id alone - the same numeric id legitimately exists
 // across many different threads (each thread counts from its own zero, see insert), so this
 // must never guess which thread a bare id belongs to.
-//
-// Takes thread as an explicit parameter rather than trusting c.Thread - every caller already has
-// the real, trusted thread in hand (it's what located this exact cycle via activeLocked's own
-// lookup a moment ago), so there's no reason to re-derive it from the Cycle's own decoded JSON,
-// which for a row corrupted by some other bug may still disagree with the thread that actually
-// holds it. Also overwrites c.Thread to match before encoding, so a legacy-corrupted entry
-// self-heals the moment anything next mutates it, instead of staying wrong forever.
 func (s *Store) update(ctx context.Context, thread string, c *Cycle) error {
 	c.Thread = thread
-	return s.db.Update(func(tx *bbolt.Tx) error {
-		bucket, err := threadBucketCreate(tx, thread)
-		if err != nil {
-			return fmt.Errorf("open thread bucket: %w", err)
-		}
-		data, err := encode(c)
-		if err != nil {
-			return err
-		}
-		return bucket.Put(idKey(c.ID), data)
-	})
+	data, err := encode(c)
+	if err != nil {
+		return err
+	}
+	return s.db.Put(cycleKey(thread, c.ID), data)
 }
 
 // SetCurrentCondition updates the active cycle's self-assessment.
@@ -792,11 +704,10 @@ func encode(c *Cycle) ([]byte, error) {
 	return b, nil
 }
 
-// decode always trusts the caller's thread (the value that already located this exact entry via
-// its thread bucket) over whatever Thread field happens to be embedded in its JSON payload -
-// belt-and-suspenders alongside update()'s own thread parameter: an entry corrupted by some
-// other bug may have a payload disagreeing with the thread that actually holds it, and every
-// read of it should self-correct rather than propagate that lie forward.
+// decode always trusts the caller's thread and id (the values that already located this exact
+// entry) over whatever those fields happen to say inside the JSON payload - belt-and-suspenders:
+// an entry corrupted by some other bug may have a payload disagreeing with the key that actually
+// holds it, and every read of it should self-correct rather than propagate that lie forward.
 func decode(id int64, thread string, data []byte) (*Cycle, error) {
 	var c Cycle
 	if err := json.Unmarshal(data, &c); err != nil {

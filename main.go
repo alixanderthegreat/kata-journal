@@ -1,6 +1,6 @@
 // Command kata is a standalone CLI for the kata structured-planning tool. It talks directly to
 // a local kata.Store (no HTTP server, no "is the server running?" step) - a CLI invocation opens
-// the bbolt file, does one thing, and closes, which is safe precisely because nothing else
+// the gordian-db-backed store file, does one thing, and closes, which is safe precisely because nothing else
 // needs to hold that file open concurrently (see kata.Store's own doc comment on why it's a
 // coarse single-mutex store regardless).
 package main
@@ -554,7 +554,7 @@ the same three-step habit of checking "what does this tool do", "am I already mi
 active', 'kata history' - orient just makes it one deterministic command instead of a memorized
 ritual.
 
-Storage: a bbolt file at ./.kata/kata.db if one already exists there, otherwise ~/.kata/kata.db -
+Storage: a gordian-db-backed store at ./.kata/kata.db if one already exists there, otherwise ~/.kata/kata.db -
 one consolidated store shared across every project that hasn't been given its own local db
 (override either case with KATA_DB_PATH) - no server to start or stop, each invocation opens the
 file, does one thing, and closes.

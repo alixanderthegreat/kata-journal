@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"go.etcd.io/bbolt"
 )
+
+// Three legacy-format self-healing tests (TestLegacyCorruptedRowSelfHeals,
+// TestLegacyObstacleDecodesAsBareString, TestLegacyTestItemResultsDecodesAsBareString) were
+// removed here, not adapted - see kata cycle 13 (gordian-db's own project): they existed to
+// prove old bbolt-encoded rows (predating certain fields, or written in an older JSON shape)
+// still decoded correctly, planted directly via raw bbolt transactions. A gordian-db-backed
+// Store has no such legacy bbolt data to migrate or self-heal from, so there is nothing for an
+// equivalent test to exercise - this isn't a coverage regression, it's dropping tests whose
+// entire premise no longer applies. TestChallengeScopedByProject and TestPruneAutonomous were
+// ADAPTED instead (their core assertions are genuine, portable business logic), not removed -
+// see their own bodies below for what changed and why.
 
 // TestCycleLifecycle walks one full kata: Start, record an obstacle (which must NOT be required
 // for the Test to close), add Test items unrelated to that obstacle, set cycle-level
@@ -285,18 +293,18 @@ func TestPruneAutonomous(t *testing.T) {
 		t.Fatalf("PruneAutonomous: %v", err)
 	}
 
+	// Adapted from raw-bbolt-bucket verification to the public API (kata cycle 13): what
+	// remains after pruning is exactly the active cycle plus everything ClosedCycles reports.
 	remaining := map[int64]bool{}
-	if err := s.db.View(func(tx *bbolt.Tx) error {
-		bucket := threadBucket(tx, thread)
-		if bucket == nil {
-			return nil
-		}
-		return bucket.ForEach(func(k, v []byte) error {
-			remaining[idFromKey(k)] = true
-			return nil
-		})
-	}); err != nil {
-		t.Fatalf("query remaining: %v", err)
+	if active != nil {
+		remaining[active.ID] = true
+	}
+	closedAfterPrune, err := s.ClosedCycles(ctx, thread)
+	if err != nil {
+		t.Fatalf("ClosedCycles: %v", err)
+	}
+	for _, c := range closedAfterPrune {
+		remaining[c.ID] = true
 	}
 
 	for _, id := range directedIDs {
@@ -434,66 +442,6 @@ func TestUpdateScopedByThread(t *testing.T) {
 	}
 }
 
-// TestLegacyCorruptedRowSelfHeals reproduces the exact shape found live: an entry stored under
-// the correct thread bucket, but whose JSON payload's embedded Thread field disagrees (planted
-// directly via bbolt, mimicking what the pre-fix update() bug actually left behind). A read must
-// report the trusted thread, not the stale payload, and any subsequent write must self-heal the
-// payload rather than perpetuate the lie.
-func TestLegacyCorruptedRowSelfHeals(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "kata.db")
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer s.Close()
-
-	ctx := context.Background()
-	trueThread := "thread-a"
-	corruptedData := []byte(`{"id":223,"kind":"autonomous","thread":"thread-b","challenge":"Play.","target_condition":"t","current_condition":"c","deadline":"2099-01-01T00:00:00Z","started_at":"2026-01-01T00:00:00Z"}`)
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		bucket, err := threadBucketCreate(tx, trueThread)
-		if err != nil {
-			return err
-		}
-		return bucket.Put(idKey(223), corruptedData)
-	}); err != nil {
-		t.Fatalf("plant corrupted row: %v", err)
-	}
-
-	active, err := s.Active(ctx, trueThread)
-	if err != nil {
-		t.Fatalf("Active: %v", err)
-	}
-	if active == nil {
-		t.Fatal("expected the planted row to be found")
-	}
-	if active.Thread != trueThread {
-		t.Fatalf("read did not self-heal: got thread=%q, want %q", active.Thread, trueThread)
-	}
-
-	if err := s.SetCurrentCondition(ctx, trueThread, "healed"); err != nil {
-		t.Fatalf("SetCurrentCondition: %v", err)
-	}
-	var data []byte
-	if err := s.db.View(func(tx *bbolt.Tx) error {
-		bucket := threadBucket(tx, trueThread)
-		if bucket == nil {
-			return fmt.Errorf("thread bucket missing")
-		}
-		v := bucket.Get(idKey(223))
-		if v == nil {
-			return fmt.Errorf("planted entry missing")
-		}
-		data = append([]byte(nil), v...)
-		return nil
-	}); err != nil {
-		t.Fatalf("query healed row: %v", err)
-	}
-	if !strings.Contains(string(data), `"thread":"thread-a"`) {
-		t.Fatalf("write did not self-heal the stored payload: %s", data)
-	}
-}
-
 // TestEditObstacle proves EditObstacle rewrites text in place, stamps EditedAt, leaves
 // RecordedAt untouched, and rejects an out-of-range index without touching the cycle.
 func TestEditObstacle(t *testing.T) {
@@ -600,69 +548,6 @@ func TestEditTestItem(t *testing.T) {
 	}
 }
 
-// TestLegacyObstacleDecodesAsBareString reproduces a real pre-existing row shape: every cycle
-// closed before Obstacle gained its own type stored "obstacles" as a bare JSON array of strings
-// (`["text"]`), not objects. Those rows must keep decoding cleanly - with a zero RecordedAt, not
-// an error and not a fabricated timestamp - and a subsequent write must upgrade the stored shape
-// without losing the original text.
-func TestLegacyObstacleDecodesAsBareString(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "kata.db")
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer s.Close()
-
-	ctx := context.Background()
-	thread := "thread-a"
-	legacyData := []byte(`{"id":0,"kind":"directed","thread":"thread-a","challenge":"Play.","target_condition":"t","current_condition":"c","obstacles":["an old obstacle, recorded before timestamps existed"],"deadline":"2099-01-01T00:00:00Z","started_at":"2026-01-01T00:00:00Z"}`)
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		bucket, err := threadBucketCreate(tx, thread)
-		if err != nil {
-			return err
-		}
-		return bucket.Put(idKey(0), legacyData)
-	}); err != nil {
-		t.Fatalf("plant legacy row: %v", err)
-	}
-
-	active, err := s.Active(ctx, thread)
-	if err != nil {
-		t.Fatalf("Active: %v", err)
-	}
-	if active == nil {
-		t.Fatal("expected the planted legacy row to be found")
-	}
-	if len(active.Obstacles) != 1 {
-		t.Fatalf("expected exactly one decoded obstacle, got %+v", active.Obstacles)
-	}
-	if active.Obstacles[0].Text != "an old obstacle, recorded before timestamps existed" {
-		t.Fatalf("legacy obstacle text lost on decode: %+v", active.Obstacles[0])
-	}
-	if !active.Obstacles[0].RecordedAt.IsZero() {
-		t.Fatalf("expected a zero RecordedAt for a legacy obstacle, got %v", active.Obstacles[0].RecordedAt)
-	}
-
-	// A new obstacle added afterward must get a real timestamp, sitting alongside the
-	// zero-timestamped legacy one without disturbing it.
-	if err := s.AddObstacle(ctx, thread, "a new obstacle, recorded now"); err != nil {
-		t.Fatalf("AddObstacle: %v", err)
-	}
-	updated, err := s.Active(ctx, thread)
-	if err != nil {
-		t.Fatalf("Active after AddObstacle: %v", err)
-	}
-	if len(updated.Obstacles) != 2 {
-		t.Fatalf("expected two obstacles after adding one, got %+v", updated.Obstacles)
-	}
-	if !updated.Obstacles[0].RecordedAt.IsZero() {
-		t.Fatalf("legacy obstacle's RecordedAt should remain zero, got %v", updated.Obstacles[0].RecordedAt)
-	}
-	if updated.Obstacles[1].RecordedAt.IsZero() {
-		t.Fatal("expected the newly added obstacle to have a real RecordedAt")
-	}
-}
-
 // TestCompleteItemAppendsResultsHistory reproduces a real incident from this project's own
 // dogfood use (kata cycle 61, test item 0): calling CompleteItem a second time on an
 // already-Done item used to silently overwrite the first result with no trace - the opposite of
@@ -723,72 +608,14 @@ func TestCompleteItemAppendsResultsHistory(t *testing.T) {
 	}
 }
 
-// TestLegacyTestItemResultsDecodesAsBareString reproduces a real pre-existing row shape: every
-// TestItem completed before Results became a history stored it as a bare JSON string, not an
-// array of entries. Those rows must keep decoding cleanly - as one entry with a zero RecordedAt,
-// not an error - and a later CompleteItem call must append alongside it without losing it.
-func TestLegacyTestItemResultsDecodesAsBareString(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "kata.db")
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer s.Close()
-
-	ctx := context.Background()
-	thread := "thread-a"
-	legacyData := []byte(`{"id":0,"kind":"directed","thread":"thread-a","challenge":"Play.","target_condition":"t","current_condition":"c","test":[{"id":0,"text":"an old test item","done":true,"results":"an old result, recorded before results were a history"}],"deadline":"2099-01-01T00:00:00Z","started_at":"2026-01-01T00:00:00Z"}`)
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		bucket, err := threadBucketCreate(tx, thread)
-		if err != nil {
-			return err
-		}
-		return bucket.Put(idKey(0), legacyData)
-	}); err != nil {
-		t.Fatalf("plant legacy row: %v", err)
-	}
-
-	active, err := s.Active(ctx, thread)
-	if err != nil {
-		t.Fatalf("Active: %v", err)
-	}
-	if active == nil {
-		t.Fatal("expected the planted legacy row to be found")
-	}
-	if len(active.Test) != 1 || len(active.Test[0].Results) != 1 {
-		t.Fatalf("expected exactly one decoded test item with one results entry, got %+v", active.Test)
-	}
-	if active.Test[0].Results[0].Text != "an old result, recorded before results were a history" {
-		t.Fatalf("legacy results text lost on decode: %+v", active.Test[0].Results[0])
-	}
-	if !active.Test[0].Results[0].RecordedAt.IsZero() {
-		t.Fatalf("expected a zero RecordedAt for a legacy result, got %v", active.Test[0].Results[0].RecordedAt)
-	}
-
-	// A completion afterward must append, sitting alongside the legacy entry without disturbing it.
-	if err := s.CompleteItem(ctx, thread, 0, "a real completion, recorded now"); err != nil {
-		t.Fatalf("CompleteItem: %v", err)
-	}
-	updated, err := s.Active(ctx, thread)
-	if err != nil {
-		t.Fatalf("Active after CompleteItem: %v", err)
-	}
-	if len(updated.Test[0].Results) != 2 {
-		t.Fatalf("expected two results entries after completing, got %+v", updated.Test[0].Results)
-	}
-	if !updated.Test[0].Results[0].RecordedAt.IsZero() {
-		t.Fatalf("legacy result's RecordedAt should remain zero, got %v", updated.Test[0].Results[0].RecordedAt)
-	}
-	if updated.Test[0].Results[1].RecordedAt.IsZero() {
-		t.Fatal("expected the newly appended result to have a real RecordedAt")
-	}
-}
-
-// TestChallengeScopedByProject proves Challenge became a per-project setting without breaking any
-// db that predates that change: a legacy flat rootChallengeKey (planted directly, the way an
-// existing db like this repo's own already has one) must still be readable as a fallback for any
-// project that hasn't set its own Challenge yet, but the moment one project sets its own, it must
-// stop seeing the legacy value and no other project may be affected by that write.
+// TestChallengeScopedByProject proves Challenge is a per-project setting: setting one project's
+// Challenge must not affect another's, and an unset project reads back "".
+//
+// ADAPTED (kata cycle 13): the original also proved a legacy flat rootChallengeKey (planted
+// directly via raw bbolt) still worked as a fallback for any project that hadn't set its own
+// Challenge yet - a bbolt-migration-compatibility concern with no equivalent for a gordian-db
+// store that has no such legacy data. That part is dropped; the core per-project-isolation
+// assertion below is unchanged in substance.
 func TestChallengeScopedByProject(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "kata.db")
 	s, err := Open(dbPath)
@@ -798,19 +625,14 @@ func TestChallengeScopedByProject(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(metaBucket).Put(rootChallengeKey, []byte("legacy challenge"))
-	}); err != nil {
-		t.Fatalf("plant legacy challenge: %v", err)
-	}
 
 	for _, project := range []string{"project-a", "project-b"} {
 		got, err := s.Challenge(ctx, project)
 		if err != nil {
 			t.Fatalf("Challenge(%q): %v", project, err)
 		}
-		if got != "legacy challenge" {
-			t.Fatalf("Challenge(%q) = %q, want fallback to legacy value", project, got)
+		if got != "" {
+			t.Fatalf("Challenge(%q) = %q, want empty before anything is set", project, got)
 		}
 	}
 
@@ -823,14 +645,14 @@ func TestChallengeScopedByProject(t *testing.T) {
 		t.Fatalf("Challenge(project-a): %v", err)
 	}
 	if gotA != "project A's own challenge" {
-		t.Fatalf("Challenge(project-a) = %q, want the newly-set project value, not the legacy fallback", gotA)
+		t.Fatalf("Challenge(project-a) = %q, want the newly-set project value", gotA)
 	}
 
 	gotB, err := s.Challenge(ctx, "project-b")
 	if err != nil {
 		t.Fatalf("Challenge(project-b): %v", err)
 	}
-	if gotB != "legacy challenge" {
-		t.Fatalf("Challenge(project-b) = %q, want it still on the legacy fallback, unaffected by project-a's write", gotB)
+	if gotB != "" {
+		t.Fatalf("Challenge(project-b) = %q, want it still empty, unaffected by project-a's write", gotB)
 	}
 }
