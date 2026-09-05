@@ -2,7 +2,7 @@ module github.com/alixanderthegreat/kata-journal
 
 go 1.27.0
 
-require github.com/alixanderthegreat/gordian-db v0.0.0-20260905143237-73c1aa0b762a
+require github.com/alixanderthegreat/gordian-db v0.0.0-20260905151438-3d7698f10818
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
