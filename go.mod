@@ -2,14 +2,7 @@ module github.com/alixanderthegreat/kata-journal
 
 go 1.27.0
 
-// gordian-db (kata cycle 12, kata-journal side): pinned to the local sibling checkout during
-// co-development, not a shortcut around a real dependency - gordian-db's Delete method (needed
-// by PruneAutonomous) was added in this same session and isn't pushed yet. Remove this replace
-// once that change is committed and pushed, and re-run `go get -u
-// github.com/alixanderthegreat/gordian-db` to pin a real, published version.
-replace github.com/alixanderthegreat/gordian-db => ../simple-db
-
-require github.com/alixanderthegreat/gordian-db v0.0.0-00010101000000-000000000000
+require github.com/alixanderthegreat/gordian-db v0.0.0-20260905143237-73c1aa0b762a
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
