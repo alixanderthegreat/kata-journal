@@ -149,6 +149,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, "kata: create db directory:", err)
 		os.Exit(1)
 	}
+
+	// Zero-argument `migrate` is special: it must be able to run even when the resolved path
+	// itself is still an old-format bbolt file - the exact case kata.Open() below would
+	// otherwise fail on before this command ever got a chance to fix it. Every other verb,
+	// including `migrate <path>` (which imports FROM path INTO an already-open destination),
+	// goes through the unchanged kata.Open() call further down - see kata cycle 16.
+	if os.Args[1] == "migrate" && len(os.Args) == 2 {
+		s, migrated, challenges, cycles, err := kata.OpenOrMigrate(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "kata:", err)
+			os.Exit(1)
+		}
+		defer s.Close()
+		if !migrated {
+			fmt.Printf("no old-format database found at %s - nothing to self-migrate\n", path)
+			return
+		}
+		fmt.Printf("self-migrated %d challenge(s), %d cycle(s) into %s\n", challenges, cycles, path)
+		return
+	}
+
 	store, err := kata.Open(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kata: open store:", err)

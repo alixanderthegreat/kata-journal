@@ -33,6 +33,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -325,6 +326,51 @@ func (s *Store) MigrateFromBbolt(bboltPath string) (challenges, cycles int, err 
 		return nil
 	})
 	return challenges, cycles, err
+}
+
+// OpenOrMigrate opens (or creates) a Store at path, transparently self-migrating first if path
+// is itself an OLD-FORMAT bbolt database (a regular file, not a directory) rather than a
+// gordian-db-backed store - archiving the old file aside (renamed via os.Rename, NEVER deleted,
+// timestamped so it's obviously recoverable) before creating and populating the fresh store via
+// MigrateFromBbolt.
+//
+// migrated reports whether a self-migration actually happened. false (with a nil error) covers
+// two legitimate no-op cases, not failures: path doesn't exist yet (brand new install - nothing
+// to migrate), or path is already a directory (an existing gordian-db store, or something else
+// entirely - either way, not an old bbolt file this can act on).
+//
+// This exists specifically for the explicit, zero-argument `kata migrate` command - see cycle
+// 16 (gordian-db's own project): main() cannot use this for every verb's normal Open(), since
+// that would make migration silent/automatic, the opposite of the "explicit and visible" design
+// this project deliberately chose. Only the dedicated migrate command should trigger it.
+func OpenOrMigrate(path string) (store *Store, migrated bool, challenges, cycles int, err error) {
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return nil, false, 0, 0, fmt.Errorf("stat %s: %w", path, statErr)
+		}
+		s, err := Open(path)
+		return s, false, 0, 0, err
+	}
+	if info.IsDir() {
+		s, err := Open(path)
+		return s, false, 0, 0, err
+	}
+
+	archivePath := path + ".bbolt-archive-" + time.Now().Format("20060102-150405")
+	if err := os.Rename(path, archivePath); err != nil {
+		return nil, false, 0, 0, fmt.Errorf("archive old database: %w", err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		return nil, false, 0, 0, fmt.Errorf("open fresh store after archiving (old data safe at %s): %w", archivePath, err)
+	}
+	challenges, cycles, err = s.MigrateFromBbolt(archivePath)
+	if err != nil {
+		s.Close()
+		return nil, false, 0, 0, fmt.Errorf("migrate archived database (archived at %s, not deleted): %w", archivePath, err)
+	}
+	return s, true, challenges, cycles, nil
 }
 
 // SetChallenge persists one project's Challenge, keyed by project (see challengeKey) - a

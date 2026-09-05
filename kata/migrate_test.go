@@ -3,6 +3,7 @@ package kata
 import (
 	"context"
 	"encoding/binary"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -145,5 +146,101 @@ func TestMigrateFromBbolt_RefusesOverwrite(t *testing.T) {
 	}
 	if got != "already set here" {
 		t.Fatalf("Challenge(proj-a) = %q, want the pre-existing value untouched", got)
+	}
+}
+
+// TestOpenOrMigrate_NotExistYet proves a brand new path (nothing there at all) just opens
+// normally - not a self-migration, and not an error.
+func TestOpenOrMigrate_NotExistYet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new")
+	s, migrated, challenges, cycles, err := OpenOrMigrate(path)
+	if err != nil {
+		t.Fatalf("OpenOrMigrate: %v", err)
+	}
+	defer s.Close()
+	if migrated {
+		t.Fatalf("expected migrated=false for a brand new path, got true (challenges=%d cycles=%d)", challenges, cycles)
+	}
+}
+
+// TestOpenOrMigrate_AlreadyGordianDB proves an existing gordian-db store (a directory) is opened
+// normally, not mistaken for an old bbolt file.
+func TestOpenOrMigrate_AlreadyGordianDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (seed): %v", err)
+	}
+	if err := first.SetChallenge(context.Background(), "p", "already gordian-db"); err != nil {
+		t.Fatalf("SetChallenge: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s, migrated, _, _, err := OpenOrMigrate(path)
+	if err != nil {
+		t.Fatalf("OpenOrMigrate: %v", err)
+	}
+	defer s.Close()
+	if migrated {
+		t.Fatal("expected migrated=false for an already-existing gordian-db store, got true")
+	}
+	got, err := s.Challenge(context.Background(), "p")
+	if err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	if got != "already gordian-db" {
+		t.Fatalf("Challenge = %q, want the pre-existing value preserved", got)
+	}
+}
+
+// TestOpenOrMigrate_OldBboltFile reproduces the real bug found in live usage (kata cycle 16):
+// the resolved path is itself an old-format bbolt file - OpenOrMigrate must archive it aside and
+// self-migrate, not fail the way plain Open() does.
+func TestOpenOrMigrate_OldBboltFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kata.db")
+
+	// buildOldBboltFixture writes to its own chosen temp path; copy its content to the exact
+	// path OpenOrMigrate will inspect, matching the real scenario (an old file sitting at the
+	// resolved default path).
+	oldFixture := buildOldBboltFixture(t)
+	data, err := os.ReadFile(oldFixture)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write fixture to resolved path: %v", err)
+	}
+
+	s, migrated, challenges, cycles, err := OpenOrMigrate(path)
+	if err != nil {
+		t.Fatalf("OpenOrMigrate: %v", err)
+	}
+	defer s.Close()
+	if !migrated {
+		t.Fatal("expected migrated=true for an old bbolt file at the resolved path")
+	}
+	if challenges != 2 || cycles != 2 {
+		t.Fatalf("challenges=%d cycles=%d, want 2 and 2 (matching buildOldBboltFixture)", challenges, cycles)
+	}
+
+	// The archived original must still exist, untouched, findable by its documented naming
+	// convention - never deleted.
+	matches, err := filepath.Glob(path + ".bbolt-archive-*")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly 1 archived file matching %q, found %v", path+".bbolt-archive-*", matches)
+	}
+
+	got, err := s.Challenge(context.Background(), "proj-a")
+	if err != nil {
+		t.Fatalf("Challenge: %v", err)
+	}
+	if got != "A's challenge" {
+		t.Fatalf("Challenge(proj-a) = %q, want the migrated value", got)
 	}
 }
