@@ -7,6 +7,10 @@ Challenge, Target Condition, Current Condition, Obstacles, Test, Expectations, R
 No server, no accounts, no network calls. Each invocation opens a local file, does one thing, and
 closes.
 
+## Where the code lives
+
+The source of truth is Gitea on core: `alixanderthegreat/kata-journal` at `http://localhost:3001` (from device, through `ssh -N -L 3001:localhost:3001 core`). Push there. GitHub (`alixanderthegreat/kata-journal`) is the public copy, kept current within a minute by simple-gitea's `git-mirror-alixanderthegreat` service, never forced.
+
 ## What this is
 
 The *Kata Journal* is a paper form for working through a challenge iteratively: state the why,
