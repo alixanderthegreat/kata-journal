@@ -1,0 +1,31 @@
+# CI on every push: vet, build and race-test every Go module in the repo (any directory with a
+# go.mod, so a new one is covered without touching this file). No third-party actions: the job
+# fetches the commit's archive from Gitea's API, which the runner provides as $GITEA_API.
+name: ci
+on: [push]
+jobs:
+  go:
+    runs-on: golang
+    steps:
+      - name: fetch this commit
+        run: |
+          curl -fsSL -H "Authorization: token $TOKEN" -o /tmp/src.tar.gz \
+            "$GITEA_API/repos/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz"
+          mkdir -p /tmp/src && tar -xzf /tmp/src.tar.gz -C /tmp/src --strip-components=1
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: every module
+        run: |
+          cd /tmp/src
+          failed=""
+          for mod in $(find . -name go.mod -not -path '*/node_modules/*' -printf '%h\n' | sort); do
+            echo "::group::$mod"
+            if (cd "$mod" && go vet ./... && go build ./... && go test -race -count=1 ./...); then
+              echo "ok   $mod"
+            else
+              echo "FAIL $mod"
+              failed="$failed $mod"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then echo "failed:$failed"; exit 1; fi
